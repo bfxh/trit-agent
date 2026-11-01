@@ -1,4 +1,5 @@
 {
+  "replace": false,
   "values": [
     "npc_origins:tick"
   ]
