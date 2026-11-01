@@ -139,8 +139,19 @@ def check_lang(r: Report, profile: pathlib.Path) -> None:
     mods = profile / "mods"
     plus = [p for p in mods.glob("*.jar") if "origins-plus-plus" in p.name]
     core = [p for p in mods.glob("origins-forge*.jar")]
-    if not plus:
-        r.fail("mods 里找不到 origins-plus-plus 的 jar")
+    # 起源++ 2.0-forge 在 1.18.2 上结构性不兼容（用了 1.19 才有的
+    # origins:modify_resource 动作和 minecraft:warden 实体），登录握手时
+    # Calio 同步注册表会抛 ConcurrentModificationException，服务器随即踢线。
+    # 所以「移进 mods_disabled/」是一种**正确状态**，不能当成故障报出来 ——
+    # 否则每跑一次自检都一个红叉，真出问题时反而看不见了。
+    disabled = [p for p in (profile / "mods_disabled").glob("*origins-plus-plus*")] \
+        if (profile / "mods_disabled").is_dir() else []
+    if not plus and disabled:
+        r.ok(f"起源++ 已移出 mods（{len(disabled)} 份躺在 mods_disabled/）—— "
+             f"1.18.2 上不兼容，这是有意禁用")
+    elif not plus:
+        r.fail("mods 和 mods_disabled 里都没有 origins-plus-plus", "它要么该启用，"
+               "要么该明确移出；现在是丢了")
     else:
         z = zipfile.ZipFile(plus[0])
         rel = "assets/origins-plus-plus/lang/zh_cn.json"
@@ -175,8 +186,13 @@ def check_lang(r: Report, profile: pathlib.Path) -> None:
         if m and "origins_zh" in m.group(1):
             r.ok("origins_zh 资源包已在 options.txt 里启用（双保险）")
         else:
-            r.warn("origins_zh 资源包没在 options.txt 里启用",
-                   "不影响：译文已经写进 jar。只有模组更新覆盖 jar 时才需要它")
+            # 起源++ 已移出时，origins_zh 里那批译文根本没有对应的命名空间，
+            # 启用与否都无所谓。别在这种时候还催人去启用。
+            if plus:
+                r.warn("origins_zh 资源包没在 options.txt 里启用",
+                       "不影响：译文已经写进 jar。只有模组更新覆盖 jar 时才需要它")
+            else:
+                r.ok("origins_zh 资源包未启用（起源++ 已移出，这批译文暂无对应内容）")
 
 
 def check_sensors(r: Report, profile: pathlib.Path) -> None:
