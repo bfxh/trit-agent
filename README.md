@@ -637,6 +637,21 @@ python scripts/save_packs.py status "E:/MC/MC/profiles/烦人的村民"
 python scripts/save_packs.py enable "E:/MC/MC/profiles/烦人的村民" --all
 ```
 
+### 「还是没有」的时候先跑这条
+
+上面的每一件事都是**静默**的：包没启用、`data modify` 写不进去、模组 jar
+被更新覆盖、`allowCommands=0` 让 `/function` 直接被拒……游戏一律不报错。
+所以把「外面看一眼」做成了一条命令（只读，不写任何文件）：
+
+```bash
+python scripts/check_env.py --profile "E:/MC/MC/profiles/烦人的村民"
+```
+
+它检查四组：AI 本体（exe 是否比源码旧、日志路径是否可用）、每个存档的三个包
+（在不在 / 启没启用 / Enabled 与 Disabled 有没有冲突 / 存档允不允许指令）、
+汉化（jar 里的词条数与英文原文是否一一对应）、以及所有数据包的 `pack_format`。
+每一处 ✗ 后面都跟着「怎么办」。
+
 输出是这样的，`[关]` 就是"文件在、但游戏不会加载它"：
 
 ```
