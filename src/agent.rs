@@ -21,6 +21,20 @@ const STUCK_WINDOW_MS: u64 = 900;
 /// 窗口内水平位移低于这个值就算卡住（格）。
 const STUCK_MIN_TRAVEL: f32 = 0.4;
 
+/// 需要按几次 F5 才能从 `cur` 档走到 `target` 档。
+///
+/// 游戏里 F5 是个三态环：第一 → 第三背视 → 第三前视 → 第一。
+/// `known == false` 表示「不知道现在在哪一档」，此时按满一圈（3 次必回原点）
+/// 再加上目标偏移 —— 用两次多余的按键换一个确定的落点。
+pub fn perspective_steps(cur: u8, target: u8, known: bool) -> u8 {
+    let target = target % 3;
+    if known {
+        (target + 3 - (cur % 3)) % 3
+    } else {
+        3 + target
+    }
+}
+
 pub struct RunStats {
     pub ticks: u64,
     pub elapsed: Duration,
@@ -29,6 +43,8 @@ pub struct RunStats {
     pub decisions: u64,
     pub phase_hist: [u64; 5],
     pub exits: u32,
+    /// 因为游戏窗口不在前台而暂停的次数
+    pub bg_pauses: u64,
 }
 
 pub struct Agent {
@@ -82,6 +98,24 @@ pub struct Agent {
     channels: [bool; 7],
     run_log: Option<std::fs::File>,
     log_tick_stride: u64,
+
+    /* 视角记账 */
+    /// 0 = 第一视角，1 = 第三视角背视，2 = 第三视角前视。
+    /// 只在「我们自己按的 F5」上可信 —— 你手动按游戏内 F5 会让它漂，
+    /// 所以给了 F10 当等价键（走同一套记账）。
+    perspective: u8,
+    /// 是否知道当前视角。不知道就先按满一圈归零再走到目标。
+    perspective_known: bool,
+
+    /* 前台门控 */
+    /// 缓存的前台状态（100ms 刷一次，不必每拍问系统）
+    fg: bool,
+    next_fg_ms: u64,
+    /// 当前是否因为失焦而暂停注入
+    paused_bg: bool,
+    /// 累计进入暂停的次数，跑完打印出来
+    pub bg_pauses: u64,
+    next_badge_ms: u64,
 }
 
 impl Agent {
@@ -136,6 +170,13 @@ impl Agent {
             channels,
             run_log: None,
             log_tick_stride: 20,
+            perspective: 0,
+            perspective_known: false,
+            fg: true,
+            next_fg_ms: 0,
+            paused_bg: false,
+            bg_pauses: 0,
+            next_badge_ms: 0,
             cfg,
         }
     }
@@ -144,16 +185,106 @@ impl Agent {
         self.tail = Some(tail);
     }
 
+    /// 开关 AI。**幂等** —— 已经是这个状态就什么都不做，免得每按一次
+    /// 游戏内 `!ai on` 就重切一次视角。
     pub fn arm(&mut self, on: bool) {
+        if self.armed == on {
+            return;
+        }
         self.armed = on;
         self.machine.set_armed(on);
         if !on {
+            // 交还控制权必须当场松手，不能等下一拍：现在这一帧你还按着 W，
+            // 下一帧就是「人手和 AI 抢键盘」。
             self.release_all();
         }
     }
 
     pub fn is_armed(&self) -> bool {
         self.armed
+    }
+
+    // ------------------------------------------------------------ 视角
+
+    /// 切到目标视角。0 = 第一，1 = 第三背视，2 = 第三前视。
+    ///
+    /// 账本可信时按最短差值走。**账本可能不可信** —— 你手动按了游戏内 F5、
+    /// 或者上一次切换因为窗口不在前台没按成，账面就和画面对不上了。
+    /// 所以要「保证落点正确」的地方一律用 [`Self::force_perspective`]。
+    pub fn goto_perspective(&mut self, target: u8) {
+        self.set_perspective(target, false);
+    }
+
+    /// 强制切到目标视角：不管账面说什么，先按满一圈归零再走到目标。
+    /// 3 次 F5 一定回到第一视角，这是三态环的性质，不需要读当前档位。
+    pub fn force_perspective(&mut self, target: u8) {
+        self.set_perspective(target, true);
+    }
+
+    fn set_perspective(&mut self, target: u8, force: bool) {
+        let target = target % 3;
+        // force 等价于「假装不知道起点」，复用同一套步数计算
+        let known = self.perspective_known && !force;
+        let presses = perspective_steps(self.perspective, target, known);
+        if presses > 0 && !self.press_f5(presses) {
+            // 没按成（窗口不在前台）就不能记账 —— 否则账面说「已经在第一视角」，
+            // 实际画面还停在第三视角，下次交还时一次都不按，人就卡在 AI 的视角里。
+            self.perspective_known = false;
+            return;
+        }
+        self.perspective = target;
+        self.perspective_known = true;
+    }
+
+    /// 按 `times` 次 F5。返回 false 表示根本没按（不在前台）。
+    fn press_f5(&mut self, times: u8) -> bool {
+        // 不在前台时绝不能按：浏览器里 F5 是刷新，编辑器里是跳转。
+        if !self.input.is_foreground() {
+            return false;
+        }
+        for _ in 0..times {
+            self.input.key(crate::act::vk::F5, true);
+            std::thread::sleep(Duration::from_millis(55));
+            self.input.key(crate::act::vk::F5, false);
+            std::thread::sleep(Duration::from_millis(55));
+        }
+        true
+    }
+
+    /// AI 开关状态变化后同步视角：接管→第三视角，交还→第一视角。
+    ///
+    /// 两个方向都用**强制路径**（按满一圈再走）。理由很实际：
+    /// 你可能在 AI 开着时自己按了游戏 F5 看风景，账面早就漂了；
+    /// 这时候如果按差值算，交还时会停在第三视角而不是第一视角。
+    /// 多按两下的代价（约 220ms）远小于「关都关了画面还在人物背后」。
+    pub fn sync_view(&mut self) {
+        if self.armed {
+            if self.cfg.third_person_on_start {
+                self.force_perspective(self.cfg.perspective_presses);
+            }
+        } else if self.cfg.restore_first_person {
+            self.force_perspective(0);
+        }
+    }
+
+    /// F10：和游戏内 F5 同效果，但走我们自己的记账路径。
+    /// 你手动按游戏 F5 会让记账漂掉，按这个不会。
+    pub fn cycle_perspective(&mut self) {
+        let next = if self.perspective_known {
+            (self.perspective + 1) % 3
+        } else {
+            1
+        };
+        self.goto_perspective(next);
+    }
+
+    /// 把「开/关」写到窗口标题上。
+    fn update_badge(&mut self) {
+        if !self.cfg.title_badge {
+            return;
+        }
+        let t = if self.armed { "[AI 接管]" } else { "[AI 待机]" };
+        self.input.badge(Some(t));
     }
 
     /// 「解开次操作」：把某一项交还给人类。
@@ -481,7 +612,35 @@ impl Agent {
         d
     }
 
+    /// 前台门控：目标窗口不在前台就一律不注入。
+    ///
+    /// 这不是「优化」，是防止事故。`SendInput` 是系统级注入，游戏失焦后
+    /// 注入照样生效 —— 你 Alt+Tab 去看个网页，AI 就往浏览器里敲 w、点左键、
+    /// 甚至按 F5 刷新（所以按 F5 前也单查了一次前台）。
+    fn gate(&mut self, now_ms: u64) -> bool {
+        if !self.cfg.pause_when_unfocused {
+            return true;
+        }
+        if now_ms >= self.next_fg_ms {
+            self.next_fg_ms = now_ms + 100;
+            self.fg = self.input.is_foreground();
+        }
+        if self.fg {
+            self.paused_bg = false;
+            return true;
+        }
+        if !self.paused_bg {
+            self.paused_bg = true;
+            self.bg_pauses += 1;
+            self.release_all();
+        }
+        false
+    }
+
     fn apply(&mut self, d: &Decision, now_ms: u64, dt_ms: u64) {
+        if !self.gate(now_ms) {
+            return;
+        }
         // 前后
         match d.dirs[Channel::Forward.index()] {
             Tri::Pos => {
@@ -632,18 +791,20 @@ impl Agent {
         let pv = self.cfg.panic_vk;
         let av = self.cfg.toggle_attack_vk;
         let mv = self.cfg.toggle_move_vk;
+        let tv = self.cfg.toggle_perspective_vk;
+        let mut last_armed = self.armed;
 
-        // 启动时先切第三视角
-        if self.cfg.third_person_on_start {
-            self.input.focus();
-            std::thread::sleep(Duration::from_millis(120));
-            for _ in 0..self.cfg.perspective_presses {
-                self.input.key(crate::act::vk::F5, true);
-                std::thread::sleep(Duration::from_millis(60));
-                self.input.key(crate::act::vk::F5, false);
-                std::thread::sleep(Duration::from_millis(60));
-            }
+        // 启动：抢焦点 → 挂状态标记 → 切到接管视角。
+        // 抢不到焦点不做任何注入，否则键全打到别的窗口上。
+        if !self.input.focus() {
+            println!(
+                "警告：没能把游戏窗口拉到前台。切回游戏后 AI 才会动手（pause_when_unfocused={}）。",
+                self.cfg.pause_when_unfocused
+            );
         }
+        std::thread::sleep(Duration::from_millis(150));
+        self.update_badge();
+        self.sync_view();
 
         loop {
             let now = Instant::now();
@@ -665,8 +826,31 @@ impl Agent {
                         let on = !self.channels[Channel::Forward.index()];
                         self.set_channel(Channel::Forward, on);
                         self.set_channel(Channel::Strafe, on);
+                    } else if k == tv {
+                        self.cycle_perspective();
                     }
                 }
+            }
+
+            // 开关状态变了：标题标记 + 视角跟着切（接管→第三视角，交还→第一视角）
+            if self.armed != last_armed {
+                last_armed = self.armed;
+                self.update_badge();
+                self.sync_view();
+                // 全屏时标题栏根本看不见，控制台这一行是唯一还能看的反馈
+                println!(
+                    "{}",
+                    if self.armed {
+                        "▶ AI 接管（F8 交还控制权）"
+                    } else {
+                        "■ 已交还控制权（F8 重新接管）"
+                    }
+                );
+            }
+            // 游戏自己也会改标题（切世界/进服务器），定期重挂一次
+            if self.cfg.title_badge && now_ms >= self.next_badge_ms {
+                self.next_badge_ms = now_ms + 500;
+                self.input.refresh_badge();
             }
 
             // 日志不用每 tick 读，50ms 一次足够
@@ -722,6 +906,13 @@ impl Agent {
         }
 
         self.release_all();
+        // 退出时别把标记留在标题上，也别把人锁在第三视角里
+        if self.cfg.title_badge {
+            self.input.badge(None);
+        }
+        if self.armed && self.cfg.restore_first_person {
+            self.force_perspective(0);
+        }
         let elapsed = start.elapsed();
         RunStats {
             ticks,
@@ -731,6 +922,7 @@ impl Agent {
             decisions: ticks,
             phase_hist,
             exits: 0,
+            bg_pauses: self.bg_pauses,
         }
     }
 }
@@ -855,5 +1047,103 @@ mod tests {
         a.command("panic", 60);
         assert!(!a.is_armed());
         assert!(!a.key_w && !a.key_s && !a.btn_left);
+    }
+
+    // ---------------------------------------------------------- 视角记账
+
+    #[test]
+    fn perspective_known_start_uses_shortest_ring_step() {
+        // 已知档位时只按差值：第一 → 背视就是 1 次
+        assert_eq!(perspective_steps(0, 1, true), 1);
+        assert_eq!(perspective_steps(1, 2, true), 1);
+        // 环状回绕：前视 → 第一 只要 1 次，不是 2 次
+        assert_eq!(perspective_steps(2, 0, true), 1);
+        // 已经在目标档位就一次都别按
+        assert_eq!(perspective_steps(1, 1, true), 0);
+    }
+
+    #[test]
+    fn perspective_unknown_start_walks_a_full_ring() {
+        // 不知道开局在哪一档：按满一圈（3）加上目标偏移，落点必然确定。
+        // 这是「多按两下换确定性」的核心，不能改成猜。
+        for target in 0..3u8 {
+            assert_eq!(
+                perspective_steps(0, target, false),
+                3 + target,
+                "未知起点切到 {target} 档必须走满一圈"
+            );
+        }
+        // 未知时结果与 cur 无关 —— 这正是它可靠的原因
+        assert_eq!(perspective_steps(0, 1, false), perspective_steps(2, 1, false));
+    }
+
+    // ---------------------------------------------------------- 失焦门控
+
+    #[test]
+    fn unfocused_window_gets_no_injection() {
+        // Alt+Tab 出去之后 AI 必须停手：SendInput 是系统级注入，
+        // 不停就会往浏览器里敲 w、点左键。
+        let mut a = agent();
+        a.arm(true);
+        a.ingest(sens(20.0, 2, 3), 0);
+        a.input.set_foreground(false);
+        let d = a.step(100, 5);
+        assert_eq!(d.phase, Phase::Engage, "决策照常跑，只是不注入");
+        assert!(!a.key_w && !a.btn_left, "后台时一个键都不许按");
+        assert_eq!(a.bg_pauses, 1);
+        assert!(a.paused_bg);
+    }
+
+    #[test]
+    fn refocus_resumes_injection() {
+        let mut a = agent();
+        a.arm(true);
+        a.ingest(sens(20.0, 2, 3), 0);
+        a.input.set_foreground(false);
+        a.step(100, 5);
+        assert!(a.paused_bg);
+        a.input.set_foreground(true);
+        a.step(300, 5); // 前台状态 100ms 才刷一次，这里跨过去了
+        assert!(!a.paused_bg, "回到游戏后应恢复");
+        assert_eq!(a.bg_pauses, 1, "恢复不该再累加暂停次数");
+    }
+
+    #[test]
+    fn pause_can_be_disabled() {
+        let mut cfg = Config::default();
+        cfg.pause_when_unfocused = false;
+        let mut a = Agent::new(cfg, Box::new(DryInput::new()));
+        a.arm(true);
+        a.ingest(sens(20.0, 2, 3), 0);
+        a.input.set_foreground(false);
+        a.step(100, 5);
+        assert_eq!(a.bg_pauses, 0, "关掉门控后就不该暂停");
+    }
+
+    // ---------------------------------------------------------- 开关反馈
+
+    #[test]
+    fn badge_tracks_armed_state() {
+        let mut a = agent();
+        a.update_badge();
+        assert_eq!(a.input.last_badge().as_deref(), Some("[AI 待机]"));
+        a.arm(true);
+        a.update_badge();
+        assert_eq!(a.input.last_badge().as_deref(), Some("[AI 接管]"));
+        a.arm(false);
+        a.update_badge();
+        assert_eq!(a.input.last_badge().as_deref(), Some("[AI 待机]"));
+    }
+
+    #[test]
+    fn arm_toggle_is_idempotent() {
+        // 游戏内反复 `!ai on` 不该反复触发视角切换 —— arm() 靠这个判断
+        let mut a = agent();
+        assert!(!a.is_armed());
+        a.arm(true);
+        let ticks_before = a.machine.ticks;
+        a.arm(true);
+        assert!(a.is_armed());
+        assert_eq!(a.machine.ticks, ticks_before);
     }
 }

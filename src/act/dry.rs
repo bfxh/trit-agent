@@ -9,12 +9,17 @@ pub struct DryInput {
     pub counts: BTreeMap<String, u32>,
     pub focused: bool,
     pub released: u32,
+    /// 目标窗口是否在前台。测试里可以翻成 false 验证「失焦不动手」。
+    pub foreground: bool,
+    /// 最后挂上去的标题标记
+    pub badge: Option<String>,
 }
 
 impl DryInput {
     pub fn new() -> DryInput {
         DryInput {
             focused: true,
+            foreground: true,
             ..Default::default()
         }
     }
@@ -51,5 +56,18 @@ impl Input for DryInput {
     }
     fn click_center(&mut self) {
         self.bump("click_center");
+    }
+    fn is_foreground(&mut self) -> bool {
+        self.foreground
+    }
+    fn badge(&mut self, text: Option<&str>) {
+        self.badge = text.map(|s| s.to_string());
+    }
+    fn refresh_badge(&mut self) {}
+    fn set_foreground(&mut self, on: bool) {
+        self.foreground = on;
+    }
+    fn last_badge(&self) -> Option<String> {
+        self.badge.clone()
     }
 }

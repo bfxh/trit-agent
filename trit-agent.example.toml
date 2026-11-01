@@ -7,16 +7,29 @@ hz = 200
 # 窗口标题关键字（不区分大小写），用来找到 Minecraft 窗口
 window_title = "Minecraft"
 
-# 启动后是否自动切第三视角（注入 F5）
-third_person_on_start = true
-# 按几次 F5：1 = 背视第三视角，2 = 前视第三视角
+# 接管时切到第几视角：0 = 第一视角，1 = 第三视角（背视），2 = 第三视角（前视）
+# 切法是「先按满一圈归零、再按到目标」，所以不管你开局停在哪一档，结果都是确定的。
 perspective_presses = 1
+third_person_on_start = true
+# 关掉 AI（F8）时自动切回第一视角 —— 第三视角下自己操作很难受。
+restore_first_person = true
 
-# 热键（虚拟键码）：F8 开关 AI，F9 急停并交还控制权，F6 开关攻击，F7 开关移动
+# 在游戏窗口标题前挂 [AI 接管] / [AI 待机] 标记，一眼看出 AI 开没开。
+title_badge = true
+# 游戏窗口不在前台时停止注入。防止 Alt+Tab 出去后 AI 在别的窗口乱敲键盘。
+pause_when_unfocused = true
+
+# 热键（虚拟键码）：
+#   F8  = 119  开关 AI（按一下交还控制权，再按一下重新接管）
+#   F9  = 120  急停：关掉 + 强制松开所有键，但不切视角
+#   F6  = 117  单独关/开「攻击」这一项
+#   F7  = 118  单独关/开「移动」这一项（前后+左右）
+#   F10 = 121  单独切视角（AI 开/关时都可用）
 kill_switch_vk = 119
 panic_vk = 120
 toggle_attack_vk = 117
 toggle_move_vk = 118
+toggle_perspective_vk = 121
 
 # hold = 原地护主 / patrol = 向前巡逻 / follow = 跟随
 mode = "hold"
@@ -27,7 +40,16 @@ ch_look = true
 ch_attack = true
 ch_jump = true
 ch_use = true
-ch_hotbar = true
+
+# 战术开关（全部移植自整合包里 mob mod 的 AI Goal，可单独关）
+# 交战距离带：太远追 / 3~7 格站住 / 贴脸退半步
+tac_range = true
+# 爆炸物规避：苦力怕 10 格、TNT 3 格
+tac_hazard = true
+# 受伤且近身时按右键格挡（手上要是盾；拿食物会变成进食）
+tac_guard = true
+# 卡住 1.2 秒就低头砍墙
+tac_breach = true
 
 # 战斗节奏
 attack_interval_ms = 620

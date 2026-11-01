@@ -88,14 +88,23 @@ pub struct Config {
     /// 输入抖动被内部高频抹平）。
     pub hz: u32,
     pub window_title: String,
-    /// 启动即切第三视角（注入 F5）。
-    pub third_person_on_start: bool,
+    /// 接管时切到第几视角。0 = 第一视角，1 = 第三视角背视，2 = 第三视角前视。
     pub perspective_presses: u8,
+    /// 接管那一刻是否真的去切视角。关掉就完全不动你的视角。
+    pub third_person_on_start: bool,
+    /// 交还控制权（关 AI）时是否切回第一视角 —— 第三视角下人手操作很难受。
+    pub restore_first_person: bool,
+    /// 是否在游戏窗口标题前挂 `[AI 接管]` / `[已交还]` 标记。
+    /// 这是「AI 现在到底听不听我的」的唯一即时反馈，别关。
+    pub title_badge: bool,
+    /// 游戏窗口不在前台时停止注入。防止 Alt+Tab 之后 AI 在别的窗口里乱敲。
+    pub pause_when_unfocused: bool,
 
     pub kill_switch_vk: u16,
     pub panic_vk: u16,
     pub toggle_attack_vk: u16,
     pub toggle_move_vk: u16,
+    pub toggle_perspective_vk: u16,
 
     pub mode: Mode,
     pub channels: Channels,
@@ -128,12 +137,16 @@ impl Default for Config {
         Config {
             hz: 200,
             window_title: "Minecraft".to_string(),
-            third_person_on_start: true,
             perspective_presses: 1,
-            kill_switch_vk: 0x77, // F8
-            panic_vk: 0x78,       // F9
+            third_person_on_start: true,
+            restore_first_person: true,
+            title_badge: true,
+            pause_when_unfocused: true,
+            kill_switch_vk: 0x77,   // F8
+            panic_vk: 0x78,         // F9
             toggle_attack_vk: 0x75, // F6
             toggle_move_vk: 0x76,   // F7
+            toggle_perspective_vk: 0x79, // F10
             mode: Mode::Hold,
             channels: Channels::default(),
             tactics: Tactics::default(),
@@ -179,7 +192,19 @@ impl Config {
             c.third_person_on_start = v;
         }
         if let Some(v) = g("perspective_presses").and_then(|v| v.parse::<u8>().ok()) {
-            c.perspective_presses = v.min(3);
+            c.perspective_presses = v % 3;
+        }
+        if let Some(v) = g("restore_first_person").and_then(|v| parse_bool(&v)) {
+            c.restore_first_person = v;
+        }
+        if let Some(v) = g("title_badge").and_then(|v| parse_bool(&v)) {
+            c.title_badge = v;
+        }
+        if let Some(v) = g("pause_when_unfocused").and_then(|v| parse_bool(&v)) {
+            c.pause_when_unfocused = v;
+        }
+        if let Some(v) = g("toggle_perspective_vk").and_then(|v| v.parse::<u16>().ok()) {
+            c.toggle_perspective_vk = v;
         }
         if let Some(v) = g("mode") {
             c.mode = Mode::parse(&v);
@@ -297,16 +322,29 @@ hz = 200
 # 窗口标题关键字（不区分大小写），用来找到 Minecraft 窗口
 window_title = "Minecraft"
 
-# 启动后是否自动切第三视角（注入 F5）
-third_person_on_start = true
-# 按几次 F5：1 = 背视第三视角，2 = 前视第三视角
+# 接管时切到第几视角：0 = 第一视角，1 = 第三视角（背视），2 = 第三视角（前视）
+# 切法是「先按满一圈归零、再按到目标」，所以不管你开局停在哪一档，结果都是确定的。
 perspective_presses = 1
+third_person_on_start = true
+# 关掉 AI（F8）时自动切回第一视角 —— 第三视角下自己操作很难受。
+restore_first_person = true
 
-# 热键（虚拟键码）：F8 开关 AI，F9 急停并交还控制权，F6 开关攻击，F7 开关移动
+# 在游戏窗口标题前挂 [AI 接管] / [已交还] 标记，一眼看出 AI 开没开。
+title_badge = true
+# 游戏窗口不在前台时停止注入。防止 Alt+Tab 出去后 AI 在别的窗口乱敲键盘。
+pause_when_unfocused = true
+
+# 热键（虚拟键码）：
+#   F8  = 119  开关 AI（按一下关，再按一下开）
+#   F9  = 120  急停：关掉 + 强制松开所有键，不切回来
+#   F6  = 117  单独关/开「攻击」这一项
+#   F7  = 118  单独关/开「移动」这一项（前后+左右）
+#   F10 = 121  单独切视角（AI 开/关时都可用）
 kill_switch_vk = 119
 panic_vk = 120
 toggle_attack_vk = 117
 toggle_move_vk = 118
+toggle_perspective_vk = 121
 
 # hold = 原地护主 / patrol = 向前巡逻 / follow = 跟随
 mode = "hold"
@@ -367,6 +405,21 @@ mod tests {
         assert!(c.third_person_on_start);
         assert_eq!(c.kill_switch_vk, 0x77);
         assert!(c.channels.attack);
+        // 视角与交还开关必须和默认值一致，否则关 AI 后会把人锁在第三视角里
+        assert_eq!(c.perspective_presses, 1);
+        assert!(c.restore_first_person);
+        assert!(c.title_badge);
+        assert!(c.pause_when_unfocused);
+        assert_eq!(c.kill_switch_vk, 0x77); // F8
+        assert_eq!(c.panic_vk, 0x78); // F9
+        assert_eq!(c.toggle_perspective_vk, 0x79); // F10
+    }
+
+    #[test]
+    fn perspective_presses_wraps_around() {
+        // 3 和 0 是同一档（按满一圈回第一视角），别让 3 变成「按三次」的怪值
+        assert_eq!(Config::from_str("perspective_presses = 3").perspective_presses, 0);
+        assert_eq!(Config::from_str("perspective_presses = 2").perspective_presses, 2);
     }
 
     #[test]

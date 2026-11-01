@@ -76,6 +76,8 @@ unsafe extern "system" {
     fn EnumWindows(cb: unsafe extern "system" fn(Hwnd, isize) -> i32, lparam: isize) -> i32;
     fn GetWindowTextW(h: Hwnd, buf: *mut u16, max: i32) -> i32;
     fn GetWindowTextLengthW(h: Hwnd) -> i32;
+    fn SetWindowTextW(h: Hwnd, text: *const u16) -> i32;
+    fn GetClassNameW(h: Hwnd, buf: *mut u16, max: i32) -> i32;
     fn IsWindowVisible(h: Hwnd) -> i32;
     fn SetForegroundWindow(h: Hwnd) -> i32;
     fn GetForegroundWindow() -> Hwnd;
@@ -147,8 +149,16 @@ fn send_mouse(dx: i32, dy: i32, flags: u32) {
     }
 }
 
+/// 枚举到的一个窗口。
+pub struct WindowInfo {
+    pub hwnd: Hwnd,
+    pub title: String,
+    /// 窗口类名。Minecraft 走 LWJGL3，类名是 `GLFW30` —— 这比标题可靠得多。
+    pub class: String,
+}
+
 unsafe extern "system" fn enum_cb(h: Hwnd, lparam: isize) -> i32 {
-    let out = unsafe { &mut *(lparam as *mut Vec<(Hwnd, String)>) };
+    let out = unsafe { &mut *(lparam as *mut Vec<WindowInfo>) };
     if unsafe { IsWindowVisible(h) } == 0 {
         return 1;
     }
@@ -158,40 +168,104 @@ unsafe extern "system" fn enum_cb(h: Hwnd, lparam: isize) -> i32 {
     }
     let mut buf = vec![0u16; (len + 1) as usize];
     let n = unsafe { GetWindowTextW(h, buf.as_mut_ptr(), buf.len() as i32) };
-    if n > 0 {
-        out.push((h, String::from_utf16_lossy(&buf[..n as usize])));
+    if n <= 0 {
+        return 1;
     }
+    let mut cbuf = [0u16; 64];
+    let cn = unsafe { GetClassNameW(h, cbuf.as_mut_ptr(), cbuf.len() as i32) };
+    let class = if cn > 0 {
+        String::from_utf16_lossy(&cbuf[..cn as usize])
+    } else {
+        String::new()
+    };
+    out.push(WindowInfo {
+        hwnd: h,
+        title: String::from_utf16_lossy(&buf[..n as usize]),
+        class,
+    });
     1
 }
 
-/// 按标题关键字（不区分大小写）找窗口。
-pub fn find_window(keyword: &str) -> Option<(Hwnd, String)> {
-    let mut found: Vec<(Hwnd, String)> = Vec::new();
+fn enum_windows() -> Vec<WindowInfo> {
+    let mut found: Vec<WindowInfo> = Vec::new();
     unsafe {
         EnumWindows(enum_cb, &mut found as *mut _ as isize);
     }
-    let kw = keyword.to_lowercase();
     found
-        .into_iter()
-        .find(|(_, t)| t.to_lowercase().contains(&kw))
 }
 
-/// 列出所有可见窗口标题，找不到游戏时用来排查。
+/// 按标题关键字（不区分大小写）找窗口，**优先认窗口类名**。
+///
+/// 只按「标题包含关键字」找会抓错：HMCL 启动器的窗口标题是
+/// `Hello Minecraft! Launcher`，同样包含 minecraft。抓错了的后果是
+/// 给启动器改标题、对着启动器发键，而游戏那边一动不动。
+///
+/// 所以顺序是：标题命中且类名是 GLFW（真的游戏窗口）→ 标题以关键字开头
+/// → 标题包含关键字。
+pub fn find_window(keyword: &str) -> Option<(Hwnd, String)> {
+    let kw = keyword.to_lowercase();
+    let hits: Vec<WindowInfo> = enum_windows()
+        .into_iter()
+        .filter(|w| w.title.to_lowercase().contains(&kw))
+        .collect();
+    let pick = hits
+        .iter()
+        .find(|w| w.class.to_uppercase().starts_with("GLFW"))
+        .or_else(|| hits.iter().find(|w| w.title.to_lowercase().starts_with(&kw)))
+        .or_else(|| hits.first());
+    pick.map(|w| (w.hwnd, w.title.clone()))
+}
+
+/// 列出所有可见窗口，找不到游戏时用来排查。
+/// 顺带打印类名 —— 光看标题根本分不清启动器和游戏。
 pub fn list_windows() -> Vec<String> {
-    let mut found: Vec<(Hwnd, String)> = Vec::new();
-    unsafe {
-        EnumWindows(enum_cb, &mut found as *mut _ as isize);
-    }
-    found.into_iter().map(|(_, t)| t).collect()
+    enum_windows()
+        .into_iter()
+        .map(|w| format!("{} [{}]", w.title, w.class))
+        .collect()
 }
 
 pub fn key_down(vk: u16) -> bool {
     (unsafe { GetAsyncKeyState(vk as i32) } as u16 & 0x8000) != 0
 }
 
+fn window_title_of(h: Hwnd) -> String {
+    let len = unsafe { GetWindowTextLengthW(h) };
+    if len <= 0 {
+        return String::new();
+    }
+    let mut buf = vec![0u16; (len + 1) as usize];
+    let n = unsafe { GetWindowTextW(h, buf.as_mut_ptr(), buf.len() as i32) };
+    if n <= 0 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&buf[..n as usize])
+}
+
+fn set_window_title(h: Hwnd, text: &str) {
+    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        SetWindowTextW(h, wide.as_ptr());
+    }
+}
+
+/// 我们自己往标题上挂的标记。剥的时候只认这几个，免得把游戏自己的方括号吃了。
+const BADGES: [&str; 3] = ["[AI 接管]", "[AI 待机]", "[已交还]"];
+
+fn strip_badge(title: &str) -> String {
+    for b in BADGES {
+        if let Some(rest) = title.strip_prefix(b) {
+            return rest.trim_start().to_string();
+        }
+    }
+    title.to_string()
+}
+
 pub struct Win32Input {
     hwnd: Hwnd,
     title: String,
+    /// 当前想挂在标题前的标记
+    badge_text: Option<String>,
     pub sent: u64,
 }
 
@@ -200,6 +274,7 @@ impl Win32Input {
         find_window(keyword).map(|(hwnd, title)| Win32Input {
             hwnd,
             title,
+            badge_text: None,
             sent: 0,
         })
     }
@@ -288,6 +363,38 @@ impl Input for Win32Input {
         }
         send_mouse(0, 0, MOUSEEVENTF_LEFTDOWN);
         send_mouse(0, 0, MOUSEEVENTF_LEFTUP);
+    }
+
+    fn is_foreground(&mut self) -> bool {
+        // 严格按句柄判等，**不做标题兜底**。
+        //
+        // 一开始写了「前台窗口标题含 minecraft 也算」，结果反了：浏览器里
+        // 标题是 "minecraft - Google 搜索" 时会被当成游戏在前台，AI 就往
+        // 浏览器里敲 w、点左键。误判成「前台」的代价远大于误判成「后台」
+        // （后者只是 AI 不动手，标题上写着 [AI 待机] 一眼能看出来）。
+        unsafe { GetForegroundWindow() == self.hwnd }
+    }
+
+    fn badge(&mut self, text: Option<&str>) {
+        self.badge_text = text.map(|s| s.to_string());
+        self.refresh_badge();
+    }
+
+    fn refresh_badge(&mut self) {
+        // 游戏切世界/进服务器时会自己改标题，所以每次都重新读一遍再拼，
+        // 不然标记要么被覆盖，要么把旧世界名一路带到新世界。
+        let cur = window_title_of(self.hwnd);
+        if cur.is_empty() {
+            return;
+        }
+        let base = strip_badge(&cur);
+        let want = match &self.badge_text {
+            Some(t) => format!("{t} {base}"),
+            None => base,
+        };
+        if cur != want {
+            set_window_title(self.hwnd, &want);
+        }
     }
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "trit-agent"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.88"
 description = "三值决策状态机 + Minecraft 角色托管：Reflex 层高频，Unknown 一律弃权"

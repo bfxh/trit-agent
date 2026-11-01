@@ -27,11 +27,26 @@ fn main() {
         "sim" => sim(&flags),
         "probe" => probe(&flags),
         "run" => run(&flags),
+        "init" => init(&flags),
         "help" | "-h" | "--help" => help(),
         _ => {
             eprintln!("未知命令: {cmd}\n");
             help();
         }
+    }
+}
+
+/// 写出默认配置。之前 help 里列了这个命令但 match 里没有分支，
+/// 敲 `trit-agent init` 会得到「未知命令」—— 属于文档比实现超前。
+fn init(flags: &Flags) {
+    let path = PathBuf::from(flags.get("config").unwrap_or("trit-agent.toml"));
+    if path.exists() {
+        eprintln!("{} 已存在，不覆盖。要重置就先手动删掉它。", path.display());
+        return;
+    }
+    match std::fs::write(&path, DEFAULT_TOML) {
+        Ok(_) => println!("已写出 {}", path.display()),
+        Err(e) => eprintln!("写失败（{}）: {e}", path.display()),
     }
 }
 
@@ -42,15 +57,25 @@ fn help() {
 用法:
   trit-agent selftest [--hz 200] [--secs 2]   逻辑自检 + 高频节拍实测
   trit-agent sim [--verbose]                  离线场景回放
-  trit-agent probe [--config path]            检查窗口与日志路径
-  trit-agent run [--config path] [--seconds N] [--hz N] [--log path] [--mode hold|patrol|follow]
+  trit-agent probe [--config path] [--profile <整合包目录>]
+  trit-agent run   [--config path] [--seconds N] [--hz N] [--mode hold|patrol|follow]
+                   [--profile <整合包目录>] [--window 关键字] [--log path]
   trit-agent init                             生成默认配置文件
 
-热键（运行中）:
-  F8  开关 AI（关掉 = 立刻松手，控制权回你）
-  F9  急停（同 F8 关闭，但额外强制松手一次）
-  F6  开关「攻击」这一项次操作
-  F7  开关「移动」这一项次操作
+热键（运行中，全局有效）:
+  F8   开关 AI —— ★ 一键交还控制权，再按一下重新接管
+       关掉时会：立刻松开所有键 → 切回第一视角 → 标题变成 [AI 待机]
+  F9   急停 —— 关掉 AI，但不切视角（想保持第三视角看场面时用）
+  F10  切视角（第一 → 第三背视 → 第三前视 → 循环）
+       和游戏内 F5 同效，但走 agent 自己的账面，AI 关着也能按
+  F6   单独关/开「攻击」这一项
+  F7   单独关/开「移动」这一项
+
+第三视角:
+  接管时自动切到第三视角（默认背视）。切法是「按满一圈归零再走到目标」，
+  所以不管你开局停在哪一档，落点都是确定的。交还时默认切回第一视角。
+
+窗口失焦时 AI 自动停手（避免 Alt+Tab 出去后往别的窗口里乱敲）。
 
 游戏内聊天指令（AI 开着时直接打字）:
   !ai on / !ai off      !status
@@ -110,6 +135,11 @@ fn load_cfg(flags: &Flags) -> Config {
     }
     if let Some(p) = flags.get("log") {
         cfg.log_path = PathBuf::from(p);
+    }
+    if let Some(w) = flags.get("window") {
+        // 之前报错文案里写了 `--window`，但这里根本没解析它 —— 提示了一个
+        // 不存在的参数，比不提示更糟。
+        cfg.window_title = w.to_string();
     }
     if let Some(profile) = flags.get("profile") {
         cfg.log_path = PathBuf::from(profile).join("logs").join("latest.log");
@@ -438,10 +468,15 @@ fn run(flags: &Flags) {
         agent.open_run_log();
 
         println!(
-            "启动：hz={} mode={} 第三视角={} | F8 开关 AI，F9 急停",
+            "启动：hz={} mode={} 视角={} | F8 交还控制权 / F9 急停 / F10 切视角",
             agent.cfg.hz,
             agent.cfg.mode.as_str(),
-            agent.cfg.third_person_on_start
+            match agent.cfg.perspective_presses % 3 {
+                0 => "第一",
+                1 => "第三·背视",
+                2 => "第三·前视",
+                _ => unreachable!(),
+            }
         );
 
         let dur = if seconds > 0 {
@@ -454,6 +489,7 @@ fn run(flags: &Flags) {
             agent.cfg.panic_vk,
             agent.cfg.toggle_attack_vk,
             agent.cfg.toggle_move_vk,
+            agent.cfg.toggle_perspective_vk,
         ]);
         let stats = agent.run(Some(hk), dur);
         end_high_res_timer();
@@ -464,6 +500,9 @@ fn run(flags: &Flags) {
             "阶段分布 off/idle/engage/retreat/recover = {:?}",
             stats.phase_hist
         );
+        if stats.bg_pauses > 0 {
+            println!("后台暂停 {} 次（窗口失焦时 AI 停手）", stats.bg_pauses);
+        }
         println!("已强制松开所有按键。");
     }
 }
