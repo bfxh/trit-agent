@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import re
 import shutil
+import subprocess
 import sys
 import zipfile
 
@@ -30,6 +32,9 @@ DIST = ROOT / "dist"
 DATA_PACK_FORMAT = 9
 # 资源包 pack_format：1.18.2 是 8
 RESOURCE_PACK_FORMAT = 8
+
+# 起源校验要用到模组目录，默认跟 validate_origins.py 保持一致
+DEFAULT_MODS = r"E:/MC/MC/profiles/烦人的村民/mods"
 
 RESOURCE_PACKS = {"summoner_lang", "origins_zh"}
 
@@ -303,6 +308,21 @@ def main() -> None:
     if not ok:
         print("\n有数据包格式不对，别装。")
         sys.exit(1)
+
+    # 起源包要按「模组真实注册的类型」校验一遍：Apoli 解析失败是静默的，
+    # 表现出来是「起源选得到但技能栏空着」，或者列表里干脆没有这个种族。
+    if "summoner_origin" in names:
+        print()
+        script = ROOT / "scripts" / "validate_origins.py"
+        mods = pathlib.Path(os.environ.get("TRIT_MODS", DEFAULT_MODS))
+        if not mods.is_dir():
+            print(f"起源校验跳过：模组目录不存在（{mods}）")
+        else:
+            rc = subprocess.run([sys.executable, str(script), "--mods", str(mods),
+                                 "--pack", str(SRC / "summoner_origin")]).returncode
+            if rc != 0:
+                print("  起源包校验没过，先修再装。")
+                sys.exit(rc)
 
     if args.install:
         profile = pathlib.Path(args.install)

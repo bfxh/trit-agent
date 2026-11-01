@@ -612,6 +612,27 @@ datapacks/
 python scripts/build_datapacks.py --install "E:/MC/MC/profiles/烦人的村民"
 ```
 
+### 起源包会被"照 schema 体检"
+
+`build_datapacks.py` 打完包会自动跑一次 `scripts/validate_origins.py`：
+
+```bash
+python scripts/validate_origins.py            # 只查本仓库的 summoner_origin
+python scripts/validate_origins.py --all      # 连模组自带的起源一起查（自测）
+python scripts/validate_origins.py --selftest # 用坏样本验证校验器本身
+```
+
+依据不是文档，而是**这套整合包真实注册的 id** —— 从 `origins-forge` 和它内嵌的
+`apoli` 里那些注册表类把常量池抠出来（380 个 id），再拿数据包去比对。查四件事：
+
+- `type` 写没写错（`origins:actve_self` 这种，游戏只会静默不加载）
+- 必填字段在不在（`active_self` 要 `entity_action`；`attribute` 的 `modifier` 要
+  `attribute`/`operation`/`value`）
+- `powers` 引用的文件在不在（跨模组的引用去全局索引查，不误报）
+- 起源层的 `replace:true`（**会把别的模组已登记的起源整层顶掉**，选择界面只剩自己的）
+
+`--all` 会拿 origins++ 的 119 个起源 + 1405 个能力跑一遍：全过，说明校验器不会乱报。
+
 ### ⚠️ 拷进去 ≠ 装上了
 
 这一步有两个坑，都会让"装完了但没效果"，而且都不报错：
@@ -647,9 +668,10 @@ python scripts/save_packs.py enable "E:/MC/MC/profiles/烦人的村民" --all
 python scripts/check_env.py --profile "E:/MC/MC/profiles/烦人的村民"
 ```
 
-它检查四组：AI 本体（exe 是否比源码旧、日志路径是否可用）、每个存档的三个包
+它检查五组：AI 本体（exe 是否比源码旧、日志路径是否可用）、每个存档的三个包
 （在不在 / 启没启用 / Enabled 与 Disabled 有没有冲突 / 存档允不允许指令）、
-汉化（jar 里的词条数与英文原文是否一一对应）、以及所有数据包的 `pack_format`。
+汉化（jar 里的词条数与英文原文是否一一对应）、所有数据包的 `pack_format`、
+以及起源包里的类型名在不在模组真实注册表里。
 每一处 ✗ 后面都跟着「怎么办」。
 
 输出是这样的，`[关]` 就是"文件在、但游戏不会加载它"：

@@ -203,6 +203,65 @@ def check_sensors(r: Report, profile: pathlib.Path) -> None:
         r.ok(f"{seen} 个数据包 pack_format 全部 = 9")
 
 
+
+def check_origins(r: Report, profile: pathlib.Path) -> None:
+    """起源数据包：类型名/必填字段/引用，按模组真实注册表校验。
+
+    查的是**装进存档的那一份 zip**，不是仓库里的源目录 —— 免得「本地改好了
+    但没重新打包」这种情况被漏掉。
+    """
+    print()
+    print("[5] 起源数据包")
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+    try:
+        import validate_origins as vo
+    except Exception as e:
+        r.warn(f"校验器加载失败: {e}")
+        return
+    mods = profile / "mods"
+    if not mods.is_dir():
+        r.warn(f"没有 mods 目录（{mods}），跳过")
+        return
+
+    seen: dict[str, pathlib.Path] = {}
+    for w in sorted((profile / "saves").iterdir()):
+        p = w / "datapacks" / "summoner_origin.zip"
+        if p.is_file():
+            seen.setdefault(hash(p.read_bytes()), p)
+    if not seen:
+        r.fail("没有任何存档里有 summoner_origin.zip", "跑 build_datapacks.py --install")
+        return
+
+    groups = vo.registries(mods)
+    known = groups.pop("（合计）")
+    harvested, global_files = vo.harvest(mods)
+    known |= harvested
+
+    problems = 0
+    for p in seen.values():
+        files = vo.load_pack(p)
+        own_ns = {rel.split("/")[1] for rel in files if rel.startswith("data/")}
+        names = set(files)
+        bad: list[str] = []
+        for rel, d in files.items():
+            if not isinstance(d, dict) or "/tags/" in rel:
+                continue
+            if "/origin_layers/" in rel:
+                vo.check_layer(rel, d, bad, names, own_ns)
+            elif "/powers/" in rel:
+                vo.check_power(rel, d, known, bad, [])
+            elif "/origins/" in rel:
+                vo.check_origin(rel, d, bad, [], names, own_ns, global_files)
+        if bad:
+            problems += len(bad)
+            for b in bad[:5]:
+                r.fail(f"{p.parent.parent.name}: {b}")
+        else:
+            r.ok(f"起源包校验通过（{len(files)} 个 json；各存档共 {len(seen)} 份不同内容）")
+    if problems:
+        r.warn(f"共 {problems} 处，改完记得重新 build_datapacks.py 再装")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--profile", default=str(DEFAULT_PROFILE), help="游戏实例目录")
@@ -221,6 +280,7 @@ def main() -> int:
     check_saves(r, profile)
     check_lang(r, profile)
     check_sensors(r, profile)
+    check_origins(r, profile)
 
     print()
     if r.bad:
