@@ -262,6 +262,55 @@ def check_origins(r: Report, profile: pathlib.Path) -> None:
         r.warn(f"共 {problems} 处，改完记得重新 build_datapacks.py 再装")
 
 
+def check_proto(r, profile) -> None:
+    """[6] 传感器协议：数据包报的字段名和 Rust 解析器认的对不对得上。
+
+    校验对象是**存档里已装的 zip**，不是源码目录 —— 装了什么游戏就加载什么。
+    改了源码忘了重新 --install，这里会直接报出来。
+    """
+    print("[6] 传感器协议")
+    try:
+        import build_datapacks as bd
+    except Exception as e:
+        r.warn(f"校验器加载失败: {e}")
+        return
+
+    known = set(bd._rust_known_fields())
+    if not known:
+        r.warn("没从 src/perceive/mod.rs 读到字段，跳过")
+        return
+    print(f"      Rust 解析器认得 {len(known)} 个字段: {' '.join(sorted(known))}")
+
+    seen: set[tuple[str, int]] = set()
+    problems = 0
+    for w in sorted((profile / "saves").iterdir()):
+        if not w.is_dir():
+            continue
+        for pack in ("trit_bridge",):
+            z = w / "datapacks" / f"{pack}.zip"
+            if not z.is_file():
+                continue
+            key = (pack, hash(z.read_bytes()))
+            if key in seen:
+                continue
+            seen.add(key)
+            with zipfile.ZipFile(z) as zf:
+                for n in sorted(zf.namelist()):
+                    if not n.endswith(".mcfunction"):
+                        continue
+                    if "sense" not in pathlib.Path(n).name:
+                        continue
+                    text = zf.read(n).decode("utf-8")
+                    for i, ln in enumerate(text.splitlines(), 1):
+                        if "tellraw" not in ln or "<TRIT" not in ln:
+                            continue
+                        for p in bd.check_tellraw_line(ln, f"{w.name}/{n}:{i}", known):
+                            problems += 1
+                            r.fail(p)
+    if problems == 0:
+        r.ok("数据包报的字段 Rust 全认得，标签与取值一一对应")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--profile", default=str(DEFAULT_PROFILE), help="游戏实例目录")
@@ -281,6 +330,7 @@ def main() -> int:
     check_lang(r, profile)
     check_sensors(r, profile)
     check_origins(r, profile)
+    check_proto(r, profile)
 
     print()
     if r.bad:

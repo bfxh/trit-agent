@@ -216,6 +216,137 @@ def validate_nbt_paths(name: str) -> list[str]:
     return problems
 
 
+# tellraw 里的两种片段：`{"text":"<TRIT hp="}` 和 `{"score":{"name":"hp",...}}`
+TELLRAW_TEXT = re.compile(r'\{"text":"([^"]*)"\}')
+TELLRAW_SCORE = re.compile(r'\{"score":\{"name":"([^"]*)"')
+
+
+def _rust_known_fields() -> list[str]:
+    """从 Rust 解析器里抠出它认得的字段名。
+
+    不手写一份名单来对照 —— 手写名单会跟代码脱节，改名时两边一起过时、
+    检查反而变成"两边都错所以通过"。直接从 `parse_patch` 的 match 分支里读，
+    代码是唯一事实来源。
+    """
+    src = ROOT / "src" / "perceive" / "mod.rs"
+    if not src.is_file():
+        return []
+    text = src.read_text(encoding="utf-8")
+    start = text.find("match k {")
+    if start < 0:
+        return []
+    # 12 空格缩进 = parse_patch 里 match k 的分支层，别把别的 match 也捞进来
+    return re.findall(r'^\s{12}"([a-z0-9_]+)"\s*=>', text[start:], re.M)
+
+
+def check_tellraw_line(line: str, where: str, known: set[str]) -> list[str]:
+    """校验一行 tellraw 传感器输出，返回问题列表（空 = 没问题）。
+
+    查两件事：
+
+    1. text 里声明的协议字段名（`<TRIT hp=` 的 `hp`）必须在 Rust 解析器
+       白名单里。拼错一个字母 = Rust 侧静默当「这条通道没报这个量」。
+    2. `k=` 标签的个数必须等于 score 片段的个数。多一个标签就是日志里
+       写着 `hp=xxx` 却没取值；多一个取值就是算了个没人读的数。
+
+    **不查**标签和取值"是不是同一个量"：score 片段取的是记分板假人名
+    （`px` / `hst` / `dst` 之类），名字随便起，跟协议字段名无关，
+    比对没有意义 —— 一开始写了这条，结果 24 条全是假阳性。
+    """
+    labels: list[str] = []
+    for m in TELLRAW_TEXT.finditer(line):
+        body = m.group(1)
+        if body.startswith("<TRIT"):
+            body = body.split(" ", 1)[1] if " " in body else ""
+        labels += re.findall(r"([a-z0-9_]+)=", body)
+    scores = [m.group(1) for m in TELLRAW_SCORE.finditer(line)]
+
+    problems: list[str] = []
+    if known:
+        for k in labels:
+            if k not in known:
+                problems.append(
+                    f"{where}: 字段 `{k}` Rust 解析器不认识，会当「没感知」丢弃")
+    if labels and len(labels) != len(scores):
+        problems.append(
+            f"{where}: 标签 {len(labels)} 个 / 取值 {len(scores)} 个，对不上 —— "
+            f"标签: {labels}  取值: {scores}")
+    if not scores:
+        problems.append(f"{where}: tellraw 里没有任何 score 片段，这条行是死的")
+    return problems
+
+
+def validate_sensor_fields(name: str) -> list[str]:
+    """校验 tellraw 传感器行：text 的 `k=` 标签必须和紧跟着的 score 字段同名，
+    且字段名得是 Rust 解析器认得的。
+
+    这里能出两种错，都是**静默**的：
+
+    1. 标签和取值错位 —— `{"text":"<TRIT hp="}` 后面紧跟 `{"score":{"name":"food"}}`。
+       日志里照样写着 `hp=170`，其实是饱食度。Rust 侧按 `hp` 解析，拿到的
+       是错的数，AI 于是"血量 17 还很健康所以不撤退"。没有任何地方会报错。
+    2. 字段名 Rust 侧不认识 —— `p=`、`wd=` 这些是后加的，拼错一个字母就会被
+       当成"这条通道没报这个量"，按 `None` 处理，也就是"不知道"。而把
+       "不知道"当成"没有"正是这个仓库踩过三次的坑。
+
+    包名不匹配 `trit_*` 时也会跑一遍（白跑，没有 `<TRIT` 行），
+    这样将来有人把传感器迁到别的包，检查不会安静地失效。
+    """
+    src = SRC / name
+    known = set(_rust_known_fields())
+    problems: list[str] = []
+
+    for p in sorted(src.rglob("*.mcfunction")):
+        rel = p.relative_to(src)
+        for ln_no, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
+            if "tellraw" not in line or "<TRIT" not in line:
+                continue
+            problems += check_tellraw_line(line, f"{rel}:{ln_no}", known)
+    return problems
+
+
+def selftest_sensor_fields() -> int:
+    """让检查器自己被检查。构造三种坏样本，抓不到就是检查器坏了。"""
+    known = set(_rust_known_fields())
+    if not known:
+        print("  [!!] 没从 src/perceive/mod.rs 读到任何字段，检查器形同虚设")
+        return 1
+
+    cases = [
+        ("字段拼错（Rust 不认识）",
+         'tellraw @s [{"text":"<TRIT hpp="},{"score":{"name":"hpp","objective":"trit_bridge"}}]>',
+         "不认识"),
+        ("整行没有 score 片段",
+         'tellraw @s [{"text":"<TRIT hp="}]',
+         "死的"),
+        ("标签比取值多一个（写了标签没取值）",
+         'tellraw @s [{"text":"<TRIT hp="},{"score":{"name":"hp","objective":"trit_bridge"}},'
+         '{"text":" food="}]',
+         "对不上"),
+    ]
+    ok = True
+    for label, line, must in cases:
+        probs = check_tellraw_line(line, "selftest", known)
+        hit = any(must in p for p in probs)
+        ok &= hit
+        print(f"  [{'ok ' if hit else '!! '}] {label}: {'抓到' if hit else '漏了'}")
+
+    # 好样本必须放行：sense.mcfunction 与 sense_fast.mcfunction 的真实行
+    good = 0
+    for f in (SRC / "trit_bridge").rglob("sense*.mcfunction"):
+        for ln in f.read_text(encoding="utf-8").splitlines():
+            if "tellraw" in ln and "<TRIT" in ln:
+                if check_tellraw_line(ln, "selftest", known):
+                    print(f"  [!! ] 好样本被误报: {f.name}")
+                    ok = False
+                else:
+                    good += 1
+    print(f"  [{'ok ' if good else '!! '}] 真实传感器行 {good} 条全部放行")
+    ok &= good > 0
+    print("自测通过。" if ok else "自测失败。")
+    return 0 if ok else 1
+
+
 def build_one(name: str) -> pathlib.Path:
     src = SRC / name
     out = DIST / f"{name}.zip"
@@ -279,7 +410,16 @@ def main() -> None:
     ap.add_argument("--install", metavar="PROFILE", help="Minecraft 实例目录")
     ap.add_argument("--only", metavar="NAMES",
                     help="只装这几个（逗号分隔），排查时用")
+    ap.add_argument("--selftest", action="store_true",
+                    help="先验证检查器自己能抓到错，再打包")
     args = ap.parse_args()
+
+    if args.selftest:
+        print("传感器字段检查器自测：")
+        rc = selftest_sensor_fields()
+        if rc == 0:
+            print("（--selftest 只验证检查器，不打包；去掉参数才会打包）")
+        sys.exit(rc)
 
     names = sorted(p.name for p in SRC.iterdir() if p.is_dir())
     ok = True
@@ -299,6 +439,8 @@ def main() -> None:
             warnings.append(f"{name}: {prob}（tag 条目）")
         for prob in validate_nbt_paths(name):
             warnings.append(f"{name}: {prob}（NBT 路径）")
+        for prob in validate_sensor_fields(name):
+            warnings.append(f"{name}: {prob}（传感器字段）")
 
     if warnings:
         print("\n引用有问题（游戏里不会报错，只会静默失效，建议先修）：")

@@ -612,6 +612,38 @@ datapacks/
 python scripts/build_datapacks.py --install "E:/MC/MC/profiles/烦人的村民"
 ```
 
+### 传感器协议字段会被交叉校验
+
+`trit_bridge` 用 `tellraw` 把感知量写进聊天，Rust 侧再按 `k=v` 解析回来。这两边是
+**唯一**的集成点，而且中间没有任何握手 —— 字段拼错一个字母，两边都不报错，
+只是这个量永远等于「没感知」。
+
+`build_datapacks.py` 每次打包都会拿数据包实际输出的字段去比对 Rust 解析器
+**源码**里 `parse_patch` 的 match 分支（不手写名单对照，手写名单会跟代码一起
+过时，反而变成「两边都错所以通过」）。查两件事：
+
+1. text 里声明的协议字段名（`<TRIT hp=` 的 `hp`）必须在 Rust 白名单里；
+2. `k=` 标签的个数必须等于 score 片段的个数（多一个标签＝写了标签没取值）。
+
+当前两边正好对上 18 个：`b1 bd c d food h hp o od p s t w wal wd x y z`。
+
+```bash
+python scripts/build_datapacks.py --selftest   # 用坏样本验证检查器本身有效
+```
+
+`check_env.py` 的第 [6] 步也会跑一遍，但查的是**存档里装好的 zip** 而不是源码
+目录 —— 改了源码忘了重新 `--install`，那一步会直接报出来。
+
+### 别照着 1.12 的老资料改选择器
+
+`@e[type=!player,type=!item]`（npc_origins 里在用）**是合法的**：多个 `type=!`
+会 AND 累积，效果是「既不是玩家也不是物品」。不合法的是多个**正值**
+`type=cow,type=chicken`（实体不可能同时是牛又是鸡）。
+
+网上流传的「第二个覆盖第一个」出自 Arqade 2015 年的老回答，说的是 1.9 之前的
+行为；1.13 重写 `EntitySelectorParser` 之后已经变了。这条我们查过中英文 wiki
+确认，别再按旧说法去"修"了。
+
 ### 起源包会被"照 schema 体检"
 
 `build_datapacks.py` 打完包会自动跑一次 `scripts/validate_origins.py`：
