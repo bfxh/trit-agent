@@ -1,0 +1,10 @@
+{
+  "origin.summoner.beastmaster.name": "Summoner",
+  "origin.summoner.beastmaster.description": "Real fighting companions: three battle wolves and an iron guard. They actively hunt villagers and hostile NPCs, fight for you, follow you and never hurt you. Cost: -2 hearts of max health.",
+  "power.summoner.summon_wolves.name": "Summon Battle Wolves",
+  "power.summoner.summon_wolves.description": "Primary: 3 battle wolves (60 HP / 10 damage / 10 armor / fire resist + strength). 30s cooldown.",
+  "power.summoner.summon_golem.name": "Summon Iron Guard",
+  "power.summoner.summon_golem.description": "Secondary: buffed iron golem (250 HP / 25 damage / knockback immune / resistance + regeneration). 45s cooldown.",
+  "power.summoner.frail_body.name": "Frail Body",
+  "power.summoner.frail_body.description": "Max health -2 hearts."
+}
