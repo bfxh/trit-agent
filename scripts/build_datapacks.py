@@ -111,6 +111,40 @@ def validate_block_tags(name: str) -> list[str]:
     return problems
 
 
+def validate_tag_ids(name: str) -> list[str]:
+    """检查 tag 文件里每个条目的 id 长得对不对。
+
+    这条检查是有代价换来的：`block_tag()` 已经会补 `minecraft:` 前缀，某次
+    调用点又自己补了一遍，于是生成了 `minecraft:minecraft:coal_ore`。
+    **JSON 是合法的，方块也全都真实存在**，所以既没有解析错误也没有缺引用 ——
+    游戏只在后台记一行 `Couldn't read tag list trit_bridge:ores`，然后把这个
+    tag 当成空集合。表现出来是「AI 在矿洞里睁眼瞎」，而 `!gather` 一切正常。
+
+    静态校验能抓这类错误的唯一办法，是直接检查 id 的**形状**：
+    最多一个冒号、只有合法字符、tag 引用以 `#` 开头。
+    """
+    src = SRC / name
+    data = src / "data"
+    if not data.is_dir():
+        return []
+
+    id_re = re.compile(r"^#?[a-z0-9_.-]+:[a-z0-9_/.-]+$")
+    problems: list[str] = []
+    for p in data.rglob("tags/**/*.json"):
+        try:
+            j = json.loads(p.read_text(encoding="utf-8"))
+        except Exception as e:  # 解析失败由 validate_json 报，这里不重复
+            problems.append(f"{p.name}: JSON 解析失败 {e}")
+            continue
+        for i, v in enumerate(j.get("values", [])):
+            eid = v.get("id") if isinstance(v, dict) else v
+            if not isinstance(eid, str):
+                problems.append(f"{p.name}[{i}]: 不是字符串也不是 {{id:...}}")
+            elif not id_re.match(eid):
+                problems.append(f"{p.name}[{i}]: id 形状不对 -> {eid!r}")
+    return problems
+
+
 def build_one(name: str) -> pathlib.Path:
     src = SRC / name
     out = DIST / f"{name}.zip"
@@ -135,7 +169,12 @@ def check_format(path: pathlib.Path, want: int) -> tuple[bool, int]:
     return got == want, got
 
 
-def install(profile: pathlib.Path) -> None:
+def install(profile: pathlib.Path, only: set[str] | None = None) -> None:
+    """把 DIST 里的数据包装进每个存档。
+
+    `only` 只装指定的几个。排查问题时用得上：新加的数据包把世界搞崩了，
+    要"只回滚一个、别的照装"，靠手删 zip 很容易删漏某个存档。
+    """
     saves = profile / "saves"
     targets = sorted(p for p in saves.glob("*") if p.is_dir())
     if not targets:
@@ -145,6 +184,8 @@ def install(profile: pathlib.Path) -> None:
         dp.mkdir(exist_ok=True)
         for name in SRC.iterdir():
             if not (name.is_dir()) or name.name in RESOURCE_PACKS:
+                continue
+            if only and name.name not in only:
                 continue
             shutil.copy2(DIST / f"{name.name}.zip", dp / f"{name.name}.zip")
         print(f"  数据包 -> {dp}")
@@ -161,6 +202,8 @@ def install(profile: pathlib.Path) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--install", metavar="PROFILE", help="Minecraft 实例目录")
+    ap.add_argument("--only", metavar="NAMES",
+                    help="只装这几个（逗号分隔），排查时用")
     args = ap.parse_args()
 
     names = sorted(p.name for p in SRC.iterdir() if p.is_dir())
@@ -177,6 +220,8 @@ def main() -> None:
             warnings.append(f"{name}: {prob}")
         for prob in validate_block_tags(name):
             warnings.append(f"{name}: {prob}（方块标签）")
+        for prob in validate_tag_ids(name):
+            warnings.append(f"{name}: {prob}（tag 条目）")
 
     if warnings:
         print("\n引用有问题（游戏里不会报错，只会静默失效，建议先修）：")
@@ -191,7 +236,8 @@ def main() -> None:
         profile = pathlib.Path(args.install)
         if not profile.is_dir():
             raise SystemExit(f"实例目录不存在: {profile}")
-        install(profile)
+        only = {x.strip() for x in args.only.split(",") if x.strip()} if args.only else None
+        install(profile, only)
 
     print("\n提示：进入世界后执行 /reload；传感器默认关闭，需要时执行")
     print("      /function trit_bridge:on")

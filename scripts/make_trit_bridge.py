@@ -481,7 +481,11 @@ def main() -> None:
     # ---- 方块标签 ----
     write_json("data/trit_bridge/tags/blocks/solid.json", block_tag(SOLID_TAGS + SOLID_BLOCKS))
     write_json("data/trit_bridge/tags/blocks/ores.json",
-               block_tag([f"minecraft:{o}" for o in ORES],
+               # 注意别再自己加 `minecraft:` —— block_tag 会加。写重了会变成
+               # `minecraft:minecraft:coal_ore`，游戏不报错，只在后台记一行
+               # "Couldn't read tag list"，然后整个 tag 变空：
+               # 表现是 AI 在矿洞里睁眼瞎，而不是"数据包坏了"。
+               block_tag(ORES,
                          extra=[{"id": "#forge:ores", "required": False},
                                 {"id": "#c:ores", "required": False}]))
     write_json("data/trit_bridge/tags/blocks/water.json", block_tag(WATER_BLOCKS))
