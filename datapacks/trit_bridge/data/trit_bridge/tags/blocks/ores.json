@@ -1,0 +1,89 @@
+{
+  "replace": false,
+  "values": [
+    {
+      "id": "minecraft:minecraft:coal_ore",
+      "required": false
+    },
+    {
+      "id": "minecraft:minecraft:deepslate_coal_ore",
+      "required": false
+    },
+    {
+      "id": "minecraft:minecraft:iron_ore",
+      "required": false
+    },
+    {
+      "id": "minecraft:minecraft:deepslate_iron_ore",
+      "required": false
+    },
+    {
+      "id": "minecraft:minecraft:copper_ore",
+      "required": false
+    },
+    {
+      "id": "minecraft:minecraft:deepslate_copper_ore",
+      "required": false
+    },
+    {
+      "id": "minecraft:minecraft:gold_ore",
+      "required": false
+    },
+    {
+      "id": "minecraft:minecraft:deepslate_gold_ore",
+      "required": false
+    },
+    {
+      "id": "minecraft:minecraft:redstone_ore",
+      "required": false
+    },
+    {
+      "id": "minecraft:minecraft:deepslate_redstone_ore",
+      "required": false
+    },
+    {
+      "id": "minecraft:minecraft:lapis_ore",
+      "required": false
+    },
+    {
+      "id": "minecraft:minecraft:deepslate_lapis_ore",
+      "required": false
+    },
+    {
+      "id": "minecraft:minecraft:diamond_ore",
+      "required": false
+    },
+    {
+      "id": "minecraft:minecraft:deepslate_diamond_ore",
+      "required": false
+    },
+    {
+      "id": "minecraft:minecraft:emerald_ore",
+      "required": false
+    },
+    {
+      "id": "minecraft:minecraft:deepslate_emerald_ore",
+      "required": false
+    },
+    {
+      "id": "minecraft:minecraft:nether_quartz_ore",
+      "required": false
+    },
+    {
+      "id": "minecraft:minecraft:nether_gold_ore",
+      "required": false
+    },
+    {
+      "id": "minecraft:minecraft:ancient_debris",
+      "required": false
+    },
+    {
+      "id": "#forge:ores",
+      "required": false
+    },
+    {
+      "id": "#c:ores",
+      "required": false
+    }
+  ]
+}

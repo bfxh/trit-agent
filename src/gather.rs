@@ -14,10 +14,60 @@
 //!
 //! 判据全部是三值的，`Neg` 明确不许、`Zero` 不确定（也不许，但不算"危险"）、
 //! `Pos` 明确可以。合成规则：任一 `Neg` 压过全部，任一 `Zero` 降级为不确定。
+//!
+//! ## 挖矿比砍树多出来的三条
+//!
+//! 砍树站着不动就行，挖矿是**在改变自己脚下的地形**，所以多了三条判据，
+//! 每一条都是拿一次死亡换来的：
+//!
+//! 1. **脚下要有支撑**（[`Why::NoFloor`]）。挖矿时人会不自觉地往前挪，
+//!    前方是刚挖开的坑，脚下那块一旦挖掉就掉下去 —— 而坑底可能是岩浆。
+//! 2. **目标不能是岩浆**（[`Why::Lava`]）。这条看起来废话，但矿石 tag 和
+//!    岩浆 tag 是两套判据，`blk_front` 只报一个类别，必须先看危险再看收益。
+//! 3. **前方被挡就别硬走**（[`Why::Blocked`]）。地上砍树能绕，地下矿道不能：
+//!    对着墙走十秒和放弃换目标是同一件事，但前者看起来像卡死。
 
 use crate::config::GatherCfg;
 use crate::fsm::WorldView;
+use crate::perceive::Block;
 use crate::trit::Tri;
+
+/// 采什么。两种目标的门控和瞄准都不同。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Target {
+    #[default]
+    Wood,
+    Ore,
+}
+
+impl Target {
+    pub fn name(self) -> &'static str {
+        match self {
+            Target::Wood => "wood",
+            Target::Ore => "ore",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Target> {
+        match s {
+            "wood" | "tree" | "木" | "树" => Some(Target::Wood),
+            "ore" | "mine" | "矿" => Some(Target::Ore),
+            _ => None,
+        }
+    }
+    /// 这个目标现在离得多远。`None` = 视野里没有。
+    pub fn dist(self, w: &WorldView) -> Option<f32> {
+        match self {
+            Target::Wood => w.wood,
+            Target::Ore => w.ore,
+        }
+    }
+    pub fn dir(self, w: &WorldView) -> Option<i32> {
+        match self {
+            Target::Wood => w.wood_dir,
+            Target::Ore => w.ore_dir,
+        }
+    }
+}
 
 /// 采集过程中的内部模式。对外只用于观察，不参与通道裁决。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -26,10 +76,12 @@ pub enum Mode {
     Off,
     /// 想采，但安全窗口还没攒够 —— 站着等，不动手
     Wait,
-    /// 朝木头走过去
+    /// 朝目标走过去
     Approach,
-    /// 正在砍
+    /// 砍树
     Chop,
+    /// 挖矿
+    Mine,
     /// 采集中的插播：停手抬头看周围
     Scan,
     /// 被打断了，歇一会儿
@@ -43,13 +95,18 @@ impl Mode {
             Mode::Wait => "wait",
             Mode::Approach => "walk",
             Mode::Chop => "chop",
+            Mode::Mine => "mine",
             Mode::Scan => "scan",
             Mode::Cooldown => "cd",
         }
     }
-    /// 这个模式下 AI 是否该真的动手（走 / 砍）
+    /// 这个模式下 AI 是否该真的动手（走 / 砍 / 挖）
     pub fn active(self) -> bool {
-        matches!(self, Mode::Approach | Mode::Chop)
+        matches!(self, Mode::Approach | Mode::Chop | Mode::Mine)
+    }
+    /// 这个模式下需要按住左键
+    pub fn holding(self) -> bool {
+        matches!(self, Mode::Chop | Mode::Mine)
     }
 }
 
@@ -73,9 +130,18 @@ pub enum Why {
     Night,
     NightUnknown,
     NoWood,
+    NoOre,
     TooFar,
-    /// 砍太久还没断，多半判断错了（树在墙后 / 在坡上）
+    /// 砍/挖太久还没断，多半判断错了（树在墙后 / 在坡上 / 工具不对）
     LostTree,
+    /// 脚下没东西 —— 挖下去就是掉下去
+    NoFloor,
+    /// 目标或脚下是岩浆
+    Lava,
+    /// 前方被固体挡住，走不过去
+    Blocked,
+    /// 方块信息还没到（快通道没开）
+    NoBlockData,
     /// 明确安全，但「连续安全」的窗口还没攒够 —— 站着数秒
     Warmup,
     Ok,
@@ -99,8 +165,13 @@ impl Why {
             Why::Night => "night",
             Why::NightUnknown => "night?",
             Why::NoWood => "no_wood",
+            Why::NoOre => "no_ore",
             Why::TooFar => "too_far",
             Why::LostTree => "lost",
+            Why::NoFloor => "no_floor",
+            Why::Lava => "lava",
+            Why::Blocked => "blocked",
+            Why::NoBlockData => "blk?",
             Why::Warmup => "warmup",
             Why::Ok => "ok",
         }
@@ -115,6 +186,8 @@ impl Why {
                 | Why::EnemyNear
                 | Why::LowHp
                 | Why::LostTree
+                | Why::Lava
+                | Why::NoFloor
         )
     }
 }
@@ -142,6 +215,20 @@ pub fn wood_dist(tier: i32) -> Option<f32> {
     }
 }
 
+/// 数据包报的矿石距离档 -> 格数。档位 `[8, 4, 2]`。
+///
+/// 比原木收得近得多：地下根本没有"远处有矿"这回事，8 格以外全是石头。
+/// 报远了只会让 AI 朝着一堵石墙走过去。
+pub fn ore_dist(tier: i32) -> Option<f32> {
+    match tier {
+        ..=0 => None,
+        1..=2 => Some(2.0),
+        3..=4 => Some(4.0),
+        5..=8 => Some(8.0),
+        _ => Some(12.0),
+    }
+}
+
 /// 采集三个阶段的瞄准角（度）。MC 的 pitch 正数往下看。
 ///
 /// 砍树瞄 +22° 是有讲究的：树干在眼高以下的那一两格才是"站着伸手就能够到"
@@ -149,13 +236,32 @@ pub fn wood_dist(tier: i32) -> Option<f32> {
 /// 真人砍树也是砍断下面两三格就走，不跳着把整棵削平。
 pub const PITCH_CHOP: f32 = 22.0;
 pub const PITCH_WALK: f32 = 0.0;
-pub const PITCH_SCAN: f32 = -8.0;
 
 /// 死区：角度差小于这个值就不动视线。
 ///
 /// 没有死区的话，`Tri` 只给方向，每一拍都投一次 `Pos` 会一路转到脚面。
 /// 6° 大约是一个方块在 3 格外的张角，够用且不抖。
 pub const AIM_DEADBAND: f32 = 6.0;
+
+/// 眼睛离脚底的高度。算瞄准角要用。
+const EYE_HEIGHT: f32 = 1.62;
+
+/// 瞄准点取在脚底上方多高。
+///
+/// 一格方块的上表面在脚底 +1.0；挖矿时目标往往低一格到两格（挖矿道往下走的
+/// 时候），取 0.42 当折中。于是视线落差 = `EYE_HEIGHT - AIM_TARGET_Y ≈ 1.2`。
+const AIM_TARGET_Y: f32 = 0.42;
+
+/// 挖矿时该把视线压到多少度。
+///
+/// 砍树可以写死 22°，因为树干总在差不多的位置；挖矿不行 —— 站着挖脚边和
+/// 隔着三格挖矿道，需要的角度差一倍。所以按距离算：
+/// `atan(落差 / 水平距离)`，目标越近角度越大。
+pub fn aim_pitch(dist: f32) -> f32 {
+    let d = dist.max(0.8);
+    let drop = EYE_HEIGHT - AIM_TARGET_Y;
+    (drop / d).atan().to_degrees().clamp(10.0, 72.0)
+}
 
 /// 把「当前俯仰角 → 目标角」翻译成三值方向。
 ///
@@ -174,7 +280,7 @@ pub fn aim(cur: Option<f32>, want: f32) -> Option<Tri> {
     }
 }
 
-/// 多少次连续探测不到木头，才算"砍掉了一棵"。
+/// 多少次连续探测不到目标，才算"采掉了一个"。
 ///
 /// 不能只认一次：树干的判定点在眼睛高度，走到树根底下时那格可能是木头也可能是
 /// 空气（树干只有 1 格宽），偶尔会抖一下报"没有"。两次采样都空才认。
@@ -182,7 +288,7 @@ const MISS_CONFIRM: u32 = 2;
 
 pub struct Gather {
     pub mode: Mode,
-    /// 本次连采已砍几棵（够 `quota` 就去休息）
+    /// 本次连采已采几个（够 `quota` 就去休息）
     pub chopped: u32,
     /// 被危险打断了几次。这个数一直涨说明这个位置根本不适合采集
     pub interrupted: u32,
@@ -196,14 +302,14 @@ pub struct Gather {
     scan_at: u64,
     scan_until: u64,
     scan_side: Tri,
-    /// 「树可能砍掉了」的候选状态。
+    /// 「目标可能采完了」的候选状态。
     ///
-    /// 不能在砍模式下直接数缺口：木头一消失，门控立刻判 `NoWood` 把模式翻成
+    /// 不能在动手模式下直接数缺口：目标一消失，门控立刻判 `NoWood` 把模式翻成
     /// `Off`，第二拍就进不了计数分支，永远等不到确认。所以要有一个跨模式的
     /// 候选标记。
     pending_fell: bool,
     fell_streak: u32,
-    /// 开始砍这一棵的时刻。
+    /// 开始动手的时刻。
     ///
     /// 用 `Option` 而不是 0 当哨兵：`now_ms` 真的可以是 0（sim 和测试都从 0
     /// 开始计时）。用 0 当"还没开始"，第一拍就会把 `Some(0)` 当成 `None`
@@ -217,7 +323,11 @@ pub struct Gather {
     /// 想知道"到底被什么打断的"就得看这个。
     pub interrupted_by: Why,
     /// 最近一次决策用了哪个距离（给行为层拿去转向，避免重复读世界）
-    pub wood_dist: Option<f32>,
+    pub target_dist: Option<f32>,
+    /// 最近一次决策瞄的目标方块
+    pub target_pitch: f32,
+    /// 最近一次「墙壁判据」的结论，给 `!gather` 看
+    pub wall_note: &'static str,
 }
 
 impl Default for Gather {
@@ -244,25 +354,29 @@ impl Gather {
             gate: Tri::Neg,
             why: Why::Disabled,
             interrupted_by: Why::Ok,
-            wood_dist: None,
+            target_dist: None,
+            target_pitch: PITCH_CHOP,
+            wall_note: "-",
         }
     }
 
-    pub fn line(&self) -> String {
+    pub fn line(&self, cfg: &GatherCfg) -> String {
         format!(
-            "gather={} why={} 砍={} 断={}({})",
+            "gather={} 目标={} why={} 采={} 断={}({}) 墙={}",
             self.mode.name(),
+            cfg.target.name(),
             self.why.as_str(),
             self.chopped,
             self.interrupted,
-            self.interrupted_by.as_str()
+            self.interrupted_by.as_str(),
+            self.wall_note
         )
     }
 
     /// 手动重置：`!gather reset` 清配额和冷却，让它现在立刻可以开工。
     ///
-    /// 连 `pending_fell` 一起清 —— 不清的话，如果正好卡在"树没了但还没确认"
-    /// 那一拍，reset 之后第一次 tick 会立刻多算一棵，配额莫名其妙少一格。
+    /// 连 `pending_fell` 一起清 —— 不清的话，如果正好卡在"目标没了但还没确认"
+    /// 那一拍，reset 之后第一次 tick 会立刻多算一个，配额莫名其妙少一格。
     pub fn reset(&mut self) {
         self.chopped = 0;
         self.interrupted = 0;
@@ -338,9 +452,17 @@ impl Gather {
             _ => {}
         }
 
-        // 7. 有没有木头。`None` = 视野内没有（数据包 8 方向 × 3 档都没命中）。
-        let d = match w.wood {
-            None => return (Tri::Neg, Why::NoWood),
+        // 7. 有没有目标。`None` = 视野内没有（数据包射线全没命中）。
+        let d = match cfg.target.dist(w) {
+            None => {
+                return (
+                    Tri::Neg,
+                    match cfg.target {
+                        Target::Wood => Why::NoWood,
+                        Target::Ore => Why::NoOre,
+                    },
+                )
+            }
             Some(d) => d,
         };
         if d > cfg.max_walk {
@@ -348,7 +470,28 @@ impl Gather {
             return (Tri::Neg, Why::TooFar);
         }
 
-        // 8. 配额。砍够了就走，别把整片林子推平 —— 也给自己一个"回城"的节奏。
+        // 8. 挖矿独有的地形判据 —— 砍树不需要，因为树不会把人埋了。
+        if cfg.target == Target::Ore {
+            // 8a. 目标本身是岩浆就绝对不挖。矿石 tag 和危险 tag 是两套判据，
+            //     必须先看危险：`blk_front` 只报一个类别，而岩浆在 `hazard`
+            //     和 `lava` 里都可能出现。
+            if matches!(w.blk_front, Some(Block::Lava) | Some(Block::Hazard)) {
+                return (Tri::Neg, Why::Lava);
+            }
+            // 8b. 脚下要有支撑。悬空挖矿 = 掉进自己刚挖的坑。
+            //     方块数据没到（快通道没开）时不是"没支撑"，是"不知道" ——
+            //     这条最容易写错：把 None 当成 Empty 会让 AI 一下矿道就罢工。
+            match w.blk_below {
+                None => return (Tri::Zero, Why::NoBlockData),
+                Some(Block::Empty) => return (Tri::Neg, Why::NoFloor),
+                Some(Block::Lava) | Some(Block::Hazard) => return (Tri::Neg, Why::Lava),
+                Some(Block::Water) => return (Tri::Neg, Why::NoFloor),
+                Some(_) => {}
+            }
+        }
+
+        // 9. 配额。采够了就走，别把整片林子/整条矿脉推平 ——
+        //    也给自己一个"回城"的节奏。
         //    注意 `quota = 0` 是「不限制」。少了 `> 0` 这个条件，`chopped >= 0`
         //    恒真，等于把采集永久锁死在"配额已完成"。
         if cfg.quota > 0 && self.chopped >= cfg.quota {
@@ -358,20 +501,51 @@ impl Gather {
         (Tri::Pos, Why::Ok)
     }
 
+    /// 「正前方有没有墙」的独立判据。
+    ///
+    /// 不进 `gate`：墙上不挡砍树（你站在树旁边砍，前面有墙无所谓），
+    /// 只挡**走过去**那一步。塞进 gate 会让 mode 在 `Approach` 里反复翻
+    /// `Blocked`，看起来像抽风。
+    ///
+    /// 返回 `None` = 没有墙体数据（快通道没开），不是"没墙"。
+    pub fn path_blocked(&self, w: &WorldView, cfg: &GatherCfg) -> Option<bool> {
+        let wall = w.wall?;
+        // 目标方向上有墙、而准星正对的又不能挖，才算挡路。
+        // 否则挖矿时会自己把自己拦下：矿石本来就是固体，wall 位一定是 1。
+        if matches!(w.blk_front, Some(Block::Ore) | Some(Block::Log)) {
+            return Some(false);
+        }
+        // 一格高的台阶不算挡路 —— 跳上去就完了。`step` 是 None（老数据包）
+        // 时按"挡"处理，因为那时代码里根本没有跳过台阶的分支，
+        // 强行放行只会让 AI 一头撞上去。
+        if w.step == Some(true) {
+            return Some(false);
+        }
+        let dir = cfg.target.dir(w).unwrap_or(0);
+        // 直走方向和目标方向都可能被挡；两个都查一遍
+        let ahead = crate::perceive::wall_at(wall, 0);
+        let toward = crate::perceive::wall_at(wall, dir.clamp(-1, 1));
+        Some(ahead || toward)
+    }
+
     /// 每拍推进一次。返回值决定行为层这一拍做什么。
     pub fn tick(&mut self, w: &WorldView, cfg: &GatherCfg, now_ms: u64) -> Mode {
         let (g, why) = self.gate(w, cfg, now_ms);
         self.gate = g;
         self.why = why;
-        self.wood_dist = w.wood;
+        self.target_dist = cfg.target.dist(w);
+        self.target_pitch = match cfg.target {
+            Target::Wood => PITCH_CHOP,
+            Target::Ore => aim_pitch(self.target_dist.unwrap_or(3.0)),
+        };
+        let want = cfg.target.dist(w);
 
-        // ---- 记录"砍掉了一棵" ----
-        // 判据：上一拍正在砍，这一拍木头没了。缺失要连续两拍才认，
-        // 因为判定射线打在眼睛高度，走到树根底下时会偶尔漏一格。
-        if self.mode == Mode::Chop && w.wood.is_none() {
+        // ---- 记录"采掉了一个" ----
+        // 判据：上一拍正在动手，这一拍目标没了。缺失要连续两拍才认。
+        if self.mode.holding() && want.is_none() {
             self.pending_fell = true;
         }
-        if w.wood.is_some() {
+        if want.is_some() {
             // 又看见了 → 刚才只是采样抖动
             self.pending_fell = false;
             self.fell_streak = 0;
@@ -386,7 +560,7 @@ impl Gather {
         }
 
         // ---- 配额满了就休息，休息完自动开下一趟 ----
-        if self.chopped >= cfg.quota && self.rest_until == 0 && cfg.quota > 0 {
+        if cfg.quota > 0 && self.chopped >= cfg.quota && self.rest_until == 0 {
             self.rest_until = now_ms + cfg.rest_ms;
             self.mode = Mode::Off;
             return self.mode;
@@ -401,7 +575,10 @@ impl Gather {
         match g {
             // 明确不许：收手。如果是"危险"类原因，吃惩罚冷却。
             Tri::Neg => {
-                let was_working = matches!(self.mode, Mode::Approach | Mode::Chop | Mode::Scan);
+                let was_working = matches!(
+                    self.mode,
+                    Mode::Approach | Mode::Chop | Mode::Mine | Mode::Scan
+                );
                 if was_working && why.is_unsafe() {
                     self.interrupted += 1;
                     self.cd_until = now_ms + cfg.cooldown_ms;
@@ -445,28 +622,47 @@ impl Gather {
                     return self.mode;
                 }
 
-                let d = w.wood.unwrap_or(f32::INFINITY);
+                let d = want.unwrap_or(f32::INFINITY);
 
-                // 砍太久还没断 → 判断错了。别在那儿杵着，进冷却换个地方。
-                if let (Mode::Chop, Some(since)) = (self.mode, self.chop_since) {
+                // 走/挖太久还没成 → 判断错了。别在那儿杵着，进冷却换个地方。
+                if let (true, Some(since)) = (self.mode.holding(), self.chop_since) {
                     if now_ms.saturating_sub(since) > cfg.max_chop_ms {
                         self.interrupted += 1;
                         self.cd_until = now_ms + cfg.cooldown_ms;
                         self.chop_since = None;
                         self.why = Why::LostTree;
                         self.interrupted_by = Why::LostTree;
+                        self.fell_streak = 0;
+                        self.pending_fell = false;
                         self.mode = Mode::Cooldown;
                         return self.mode;
                     }
                 }
 
                 if d <= cfg.reach {
-                    // 只在「第一次进入砍」时起表。扫视会把 mode 改成 Scan 再改回来，
-                    // 如果按 mode 变化重置，插播一次就重新计时，`max_chop_ms` 永远
-                    // 触发不了 —— 卡住的树能砍一整天。
+                    // 只在「第一次进入动手」时起表。扫视会把 mode 改成 Scan 再
+                    // 改回来，如果按 mode 变化重置，插播一次就重新计时，
+                    // `max_chop_ms` 永远触发不了 —— 卡住的目标能挖一整天。
                     self.chop_since.get_or_insert(now_ms);
-                    self.mode = Mode::Chop;
+                    self.mode = match cfg.target {
+                        Target::Wood => Mode::Chop,
+                        Target::Ore => Mode::Mine,
+                    };
                 } else {
+                    // 走不过去就别硬走：地上能绕，矿道里对着墙走十秒
+                    // 和"卡死"是同一个观感。
+                    if self.path_blocked(w, cfg) == Some(true) {
+                        self.wall_note = "挡";
+                        self.chop_since = None;
+                        self.why = Why::Blocked;
+                        self.mode = Mode::Wait;
+                        return self.mode;
+                    }
+                    self.wall_note = if self.path_blocked(w, cfg).is_some() {
+                        "通"
+                    } else {
+                        "?"
+                    };
                     self.chop_since = None;
                     self.mode = Mode::Approach;
                 }
@@ -491,6 +687,13 @@ mod tests {
         }
     }
 
+    fn ore_cfg() -> GatherCfg {
+        GatherCfg {
+            target: Target::Ore,
+            ..cfg()
+        }
+    }
+
     /// 一个「明确安全 + 有木头」的世界
     fn safe(wood: Option<f32>) -> WorldView {
         WorldView {
@@ -503,6 +706,18 @@ mod tests {
             wood_dir: Some(0),
             night: Some(false),
             ..Default::default()
+        }
+    }
+
+    /// 一个「明确安全 + 前方有矿 + 脚下是石头」的世界
+    fn mine(ore: Option<f32>) -> WorldView {
+        WorldView {
+            ore,
+            ore_dir: Some(0),
+            blk_front: Some(Block::Ore),
+            blk_below: Some(Block::Solid),
+            wall: Some(0),
+            ..safe(None)
         }
     }
 
@@ -548,7 +763,6 @@ mod tests {
 
     #[test]
     fn one_missing_sample_is_not_a_felled_tree() {
-        // 判定点在眼睛高度，走到树根下会偶尔报"没有"。只认一次会多算。
         let c = cfg();
         let mut g = Gather::new();
         warm(&mut g, &safe(Some(2.0)), &c);
@@ -577,7 +791,6 @@ mod tests {
 
     #[test]
     fn unknown_threat_backs_off_without_punishment() {
-        // 不确定不是危险：站住等，但不算"被打断"
         let c = cfg();
         let mut g = Gather::new();
         warm(&mut g, &safe(Some(2.0)), &c);
@@ -590,7 +803,6 @@ mod tests {
 
     #[test]
     fn entry_needs_a_quiet_window() {
-        // 第一次安全不能立刻动手，要先攒够 enter_ms
         let c = cfg();
         let mut g = Gather::new();
         assert_eq!(g.tick(&safe(Some(2.0)), &c, 0), Mode::Wait);
@@ -600,7 +812,6 @@ mod tests {
 
     #[test]
     fn window_resets_when_it_blinks() {
-        // 攒到一半又不确定了 → 重头计，不能"断断续续也算连续"
         let c = cfg();
         let mut g = Gather::new();
         g.tick(&safe(Some(2.0)), &c, 0);
@@ -608,7 +819,6 @@ mod tests {
         let mut w = safe(Some(2.0));
         w.threat = Tri::Zero;
         g.tick(&w, &c, 1_500);
-        // 重新安全，从 2000 开始计
         assert_eq!(g.tick(&safe(Some(2.0)), &c, 2_000), Mode::Wait);
         assert_eq!(g.tick(&safe(Some(2.0)), &c, 3_000), Mode::Wait);
         assert!(g.tick(&safe(Some(2.0)), &c, 2_000 + c.enter_ms + 1).active());
@@ -637,7 +847,6 @@ mod tests {
 
     #[test]
     fn enemy_within_16_blocks_blocks_work() {
-        // 威胁判据可能滞后，距离通道独立兜底
         let c = cfg();
         let mut g = Gather::new();
         let mut w = safe(Some(2.0));
@@ -695,7 +904,6 @@ mod tests {
         }
         assert_eq!(g.mode, Mode::Off);
         assert_eq!(g.why, Why::QuotaDone);
-        // 休息完自动清零重开
         for t in (4_000..12_000).step_by(100) {
             g.tick(&safe(Some(2.0)), &c, t);
         }
@@ -705,7 +913,6 @@ mod tests {
 
     #[test]
     fn periodic_scan_interrupts_chopping() {
-        // 采集不是无脑按住左键：中间必须停下来抬头看
         let c = GatherCfg {
             scan_every_ms: 1_000,
             scan_ms: 300,
@@ -751,14 +958,11 @@ mod tests {
 
     #[test]
     fn aim_turns_until_on_target_then_stops_voting() {
-        // 没对准：往需要的方向转
         assert_eq!(aim(Some(0.0), 22.0), Some(Tri::Pos), "要往下看");
         assert_eq!(aim(Some(40.0), 22.0), Some(Tri::Neg), "要往上看");
-        // 对准了：一个字都不投，否则会一直转到脚面
         assert_eq!(aim(Some(22.0), 22.0), None);
         assert_eq!(aim(Some(17.0), 22.0), None);
         assert_eq!(aim(Some(27.0), 22.0), None);
-        // 没读到角度就别猜
         assert_eq!(aim(None, 22.0), None);
     }
 
@@ -772,7 +976,6 @@ mod tests {
 
     #[test]
     fn quota_zero_means_unlimited_not_already_done() {
-        // 回归：`chopped >= quota` 在 quota = 0 时恒真，曾经把采集永久锁死。
         let c = GatherCfg { quota: 0, ..cfg() };
         let mut g = Gather::new();
         g.chopped = 99;
@@ -781,8 +984,6 @@ mod tests {
 
     #[test]
     fn chop_timer_works_from_time_zero() {
-        // 回归：以前用 0 当"还没开始砍"的哨兵，而 now_ms 真的可以是 0。
-        // 结果第一拍把 Some(0) 当成 None 重新计时，max_chop_ms 永远不触发。
         let c = GatherCfg {
             max_chop_ms: 1_500,
             enter_ms: 0,
@@ -799,7 +1000,6 @@ mod tests {
 
     #[test]
     fn reset_clears_the_pending_fell_marker() {
-        // 回归：卡在"树没了但还没确认"那一拍时 reset，下一拍会白多算一棵
         let c = cfg();
         let mut g = Gather::new();
         warm(&mut g, &safe(Some(2.0)), &c);
@@ -816,5 +1016,184 @@ mod tests {
         assert!(!Why::NoWood.is_unsafe());
         assert!(!Why::QuotaDone.is_unsafe());
         assert!(!Why::Night.is_unsafe(), "夜里不该算被打断");
+        assert!(Why::Lava.is_unsafe(), "挖到岩浆必须算危险");
+        assert!(Why::NoFloor.is_unsafe(), "掉坑也算危险");
+        assert!(!Why::Blocked.is_unsafe(), "被墙挡只是走不通，不是危险");
+    }
+
+    // ---- 挖矿 ----
+
+    #[test]
+    fn ore_tier_maps_to_distance() {
+        assert_eq!(ore_dist(0), None);
+        assert_eq!(ore_dist(2), Some(2.0));
+        assert_eq!(ore_dist(4), Some(4.0));
+        assert_eq!(ore_dist(8), Some(8.0));
+    }
+
+    #[test]
+    fn mining_enters_mine_mode_not_chop() {
+        let c = ore_cfg();
+        let mut g = Gather::new();
+        assert_eq!(warm(&mut g, &mine(Some(2.0)), &c), Mode::Mine);
+        assert!(g.mode.holding(), "挖矿要按住左键");
+    }
+
+    #[test]
+    fn wood_target_ignores_ore() {
+        // 目标是木头时，看得见矿也不去挖
+        let c = cfg();
+        let mut g = Gather::new();
+        let mut w = mine(Some(2.0));
+        w.wood = None;
+        warm(&mut g, &w, &c);
+        assert_eq!(g.why, Why::NoWood);
+    }
+
+    #[test]
+    fn ore_target_ignores_wood() {
+        let c = ore_cfg();
+        let mut g = Gather::new();
+        let mut w = mine(None);
+        w.wood = Some(2.0);
+        warm(&mut g, &w, &c);
+        assert_eq!(g.why, Why::NoOre);
+    }
+
+    #[test]
+    fn no_floor_refuses_to_mine() {
+        // 脚下一空，挖下去就是掉进自己刚挖的坑
+        let c = ore_cfg();
+        let mut g = Gather::new();
+        let mut w = mine(Some(2.0));
+        w.blk_below = Some(Block::Empty);
+        warm(&mut g, &w, &c);
+        assert_eq!(g.why, Why::NoFloor);
+        assert_eq!(g.mode, Mode::Off);
+    }
+
+    #[test]
+    fn standing_on_lava_refuses() {
+        let c = ore_cfg();
+        let mut g = Gather::new();
+        let mut w = mine(Some(2.0));
+        w.blk_below = Some(Block::Lava);
+        warm(&mut g, &w, &c);
+        assert_eq!(g.why, Why::Lava);
+    }
+
+    #[test]
+    fn standing_in_water_refuses() {
+        // 水里挖矿 = 挖开就淹，而且游着够不到方块
+        let c = ore_cfg();
+        let mut g = Gather::new();
+        let mut w = mine(Some(2.0));
+        w.blk_below = Some(Block::Water);
+        warm(&mut g, &w, &c);
+        assert_eq!(g.why, Why::NoFloor);
+    }
+
+    #[test]
+    fn aiming_at_lava_refuses_even_if_ore_nearby() {
+        // 矿就在旁边，但准星对着岩浆 —— 先看危险，再看收益
+        let c = ore_cfg();
+        let mut g = Gather::new();
+        let mut w = mine(Some(2.0));
+        w.blk_front = Some(Block::Lava);
+        warm(&mut g, &w, &c);
+        assert_eq!(g.why, Why::Lava);
+    }
+
+    #[test]
+    fn missing_block_data_is_unknown_not_unsafe() {
+        // 回归：把 blk_below 的 None 当成 Empty 会让 AI 一下矿道就永久罢工。
+        // 它该是「不确定」—— 站住等，但不吃惩罚冷却。
+        let c = ore_cfg();
+        let mut g = Gather::new();
+        let mut w = mine(Some(2.0));
+        w.blk_below = None;
+        for t in (0..6_000).step_by(100) {
+            g.tick(&w, &c, t);
+        }
+        assert_eq!(g.why, Why::NoBlockData);
+        assert_eq!(g.gate, Tri::Zero);
+        assert_eq!(g.mode, Mode::Wait);
+        assert_eq!(g.interrupted, 0, "不知道不该算被打断");
+    }
+
+    #[test]
+    fn mining_counts_one_ore_when_it_disappears() {
+        let c = ore_cfg();
+        let mut g = Gather::new();
+        warm(&mut g, &mine(Some(2.0)), &c);
+        assert_eq!(g.mode, Mode::Mine);
+        warm(&mut g, &mine(None), &c);
+        warm(&mut g, &mine(None), &c);
+        assert_eq!(g.chopped, 1);
+    }
+
+    #[test]
+    fn wall_blocks_approach_but_not_chopping() {
+        // 前方有墙、又没什么可挖的 → 走过去那一步被拦
+        let c = cfg();
+        let mut g = Gather::new();
+        let mut w = safe(Some(8.0));
+        w.wall = Some(1); // 正前方 1 格是固体
+        w.blk_front = Some(Block::Solid);
+        w.step = Some(false); // 而且上面也是固体 → 两格高，跳不过去
+        for t in (0..6_000).step_by(100) {
+            g.tick(&w, &c, t);
+        }
+        assert_eq!(g.why, Why::Blocked);
+        assert_eq!(g.mode, Mode::Wait);
+        assert_eq!(g.wall_note, "挡");
+    }
+
+    #[test]
+    fn ore_ahead_is_not_a_wall() {
+        // 挖矿时正前方就是矿石 —— 它当然是固体，但不能算"被墙挡住"，
+        // 否则 AI 会自己把自己拦下来，永远不开始挖。
+        let c = ore_cfg();
+        let mut g = Gather::new();
+        let mut w = mine(Some(8.0));
+        w.wall = Some(1);
+        w.blk_front = Some(Block::Ore);
+        for t in (0..6_000).step_by(100) {
+            g.tick(&w, &c, t);
+        }
+        assert_eq!(g.mode, Mode::Approach, "why={:?}", g.why);
+    }
+
+    #[test]
+    fn no_wall_data_does_not_block() {
+        // 快通道没开时 wall 是 None —— 不能因此罢工，只是不知道而已
+        let c = cfg();
+        let mut g = Gather::new();
+        let mut w = safe(Some(8.0));
+        w.wall = None;
+        w.blk_front = None;
+        warm(&mut g, &w, &c);
+        assert_eq!(g.mode, Mode::Approach);
+        assert_eq!(g.wall_note, "?");
+    }
+
+    #[test]
+    fn mining_pitch_follows_distance() {
+        // 越近越要往下看。写死一个角度的话，脚边的矿会永远瞄不到。
+        assert!(aim_pitch(1.0) > aim_pitch(2.0));
+        assert!(aim_pitch(2.0) > aim_pitch(4.0));
+        assert!(aim_pitch(0.2) <= 72.0, "不能转到正下方");
+        assert!(aim_pitch(99.0) >= 10.0, "远处也得低头");
+        // 3 格外的矿石大约 22°，和砍树的角度接近
+        assert!((aim_pitch(3.0) - 21.8).abs() < 2.0);
+    }
+
+    #[test]
+    fn target_parsing() {
+        assert_eq!(Target::parse("ore"), Some(Target::Ore));
+        assert_eq!(Target::parse("矿"), Some(Target::Ore));
+        assert_eq!(Target::parse("wood"), Some(Target::Wood));
+        assert_eq!(Target::parse("树"), Some(Target::Wood));
+        assert_eq!(Target::parse("nope"), None);
     }
 }

@@ -14,7 +14,7 @@ use trit_agent::agent::Agent;
 use trit_agent::config::{Config, Mode, DEFAULT_TOML};
 use trit_agent::fsm::{Channel, Machine, Phase, Vote, WorldView};
 use trit_agent::perceive::logtail::LogTail;
-use trit_agent::perceive::{LogEvent, Sensor};
+use trit_agent::perceive::{Block, LogEvent, SensorPatch};
 use trit_agent::trit::{from_balanced, to_balanced, trits_str, Tri};
 
 fn main() {
@@ -25,6 +25,7 @@ fn main() {
     match cmd {
         "selftest" => selftest(&flags),
         "sim" if flags.has("gather") => sim_gather(&flags),
+        "sim" if flags.has("mine") => sim_mine(&flags),
         "sim" => sim(&flags),
         "probe" => probe(&flags),
         "run" => run(&flags),
@@ -259,19 +260,18 @@ fn high_freq_bench(hz: u32, dur: Duration) -> (u64, Duration) {
     let mut a = Agent::new(cfg, Box::new(DryInput::new()));
     a.arm(true);
     a.ingest(
-        LogEvent::Sensor(Sensor {
-            hp: 20.0,
-            food: 17,
-            x: 0.0,
-            y: 64.0,
-            z: 0.0,
-            hostiles: 2,
-            dist_tier: 3,
-            hazard_tier: 0,
-            wood_tier: 0,
-            wood_dir: 0,
-            tod: 8_000,
-            pitch: 0.0,
+        LogEvent::Sensor(SensorPatch {
+            hp: Some(20.0),
+            food: Some(17),
+            pos: Some((0.0, 64.0, 0.0)),
+            hostiles: Some(2),
+            dist_tier: Some(3),
+            hazard_tier: Some(0),
+            wood_tier: Some(0),
+            wood_dir: Some(0),
+            tod: Some(8_000),
+            pitch: Some(0.0),
+            ..Default::default()
         }),
         0,
     );
@@ -348,20 +348,19 @@ fn sim(flags: &Flags) {
         // 传感器每秒上报一次（数据包是 20 tick = 1 秒）
         if t >= next_sense {
             a.ingest(
-                LogEvent::Sensor(Sensor {
-                    hp: 20.0,
-                    food: 17,
-                    x: mx,
-                    y: 64.0,
-                    z: mz,
-                    hostiles: scene.2,
-                    dist_tier: scene.3,
-                    hazard_tier: scene.4,
+                LogEvent::Sensor(SensorPatch {
+                    hp: Some(20.0),
+                    food: Some(17),
+                    pos: Some((mx, 64.0, mz)),
+                    hostiles: Some(scene.2),
+                    dist_tier: Some(scene.3),
+                    hazard_tier: Some(scene.4),
                     // 战法演示的场景里没有木头；采集用 `sim gather` 单独演
-                    wood_tier: 0,
-                    wood_dir: 0,
-                    tod: 8_000,
-                    pitch: 0.0,
+                    wood_tier: Some(0),
+                    wood_dir: Some(0),
+                    tod: Some(8_000),
+                    pitch: Some(0.0),
+                    ..Default::default()
                 }),
                 t,
             );
@@ -451,7 +450,7 @@ mode = hold
     println!("tick  phase   gather  why          move pitch atk   说明");
     let mut last: Option<(Phase, trit_agent::gather::Mode, trit_agent::gather::Why, Tri, Tri, bool)> =
         None;
-    // 模拟的视线俯仰角。真实环境里这是数据包每秒报一次的绝对值；
+    // 模拟的视线俯仰角。真实环境里这是数据包报上来的绝对值；
     // 这里按 look_rate 推算，好让演示能看出「闭环对准」在动。
     let mut cur_pitch = 0.0f32;
 
@@ -462,22 +461,33 @@ mode = hold
             .copied()
             .unwrap_or(scenes[scenes.len() - 1]);
 
-        // 数据包是 20 tick（1 秒）一报，这里照旧
+        // ---- 快通道：每 100ms 一帧，只报俯仰角 ----
+        // 关键是**延迟一帧**：`cur_pitch` 在这一拍 step 之后才更新，所以这里
+        // ingest 进去的是上一拍结算后的角度，等于模拟了「100ms 前看到的世界」。
+        // 不模拟这个延迟的话，闭环永远是瞬间对齐，演示什么也看不出。
+        a.ingest(
+            LogEvent::Sensor(SensorPatch {
+                pitch: Some(cur_pitch),
+                fast: true,
+                ..Default::default()
+            }),
+            t,
+        );
+
+        // ---- 慢通道：每 1 秒一帧，报资源 / 血量 / 敌人 ----
         if t % 1_000 == 0 {
             a.ingest(
-                LogEvent::Sensor(Sensor {
-                    hp: sc.5,
-                    food: 18,
-                    x: 0.0,
-                    y: 64.0,
-                    z: 0.0,
-                    hostiles: sc.3,
-                    dist_tier: sc.4,
-                    hazard_tier: 0,
-                    wood_tier: sc.2,
-                    wood_dir: 0,
-                    tod: sc.6,
-                    pitch: cur_pitch,
+                LogEvent::Sensor(SensorPatch {
+                    hp: Some(sc.5),
+                    food: Some(18),
+                    pos: Some((0.0, 64.0, 0.0)),
+                    hostiles: Some(sc.3),
+                    dist_tier: Some(sc.4),
+                    hazard_tier: Some(0),
+                    wood_tier: Some(sc.2),
+                    wood_dir: Some(0),
+                    tod: Some(sc.6),
+                    ..Default::default()
                 }),
                 t,
             );
@@ -530,6 +540,137 @@ mode = hold
         a.gather.interrupted_by.as_str()
     );
     println!("说明：atk 列「按住」= 正在砍方块，「点」= 单次挥击，「-」= 不按。");
+}
+
+// ---------------------------------------------------------------- sim --mine
+
+/// 挖矿演示：把「挖矿比砍树多出来的那三条」逐秒演一遍。
+///
+/// 砍树站着不动就行，挖矿是在改自己脚下的地形，所以每一条拒绝都有具体的
+/// 死法在后面：悬空挖 = 掉进自己挖的坑，脚踩岩浆 = 掉进去就死，对着墙走 =
+/// 原地推墙十秒。这个演示就是让这三条在时间线上各出现一次。
+fn sim_mine(flags: &Flags) {
+    let verbose = flags.has("verbose");
+    // 冷却默认是 8 秒（真实环境里就该这么长 —— 危险刚过就回去挖是最蠢的）。
+    // 演示里压到 2 秒，否则一次打断就把后面三种死法全盖住了，什么也看不出。
+    let cfg = Config::from_str("hz = 200
+gather = true
+gather_target = ore
+gather_cooldown_ms = 2000
+mode = hold
+");
+    let mut a = Agent::new(cfg, Box::new(DryInput::new()));
+    a.arm(true);
+
+    // (起, 止, 矿档, 脚下方块, 准星方块, 墙体, 说明)
+    //
+    // 墙体掩码 1 = 正前方 1 格是固体。注意「准星对着矿石」时那条掩码也一定是 1
+    // （矿石本来就是固体），所以 walk 阶段到底算不算被挡，靠的是 blk_front：
+    // 对着能挖的东西就不算挡路。
+    let scenes: [(u64, u64, i32, Block, Block, u8, &str); 6] = [
+        (0, 3_000, 4, Block::Solid, Block::Empty, 0, "矿在 4 格 → 走过去"),
+        (3_000, 6_000, 2, Block::Solid, Block::Ore, 1, "到 2 格，准星对上矿石 → 开挖"),
+        (6_000, 8_000, 2, Block::Empty, Block::Ore, 1, "脚下被挖空 → 立刻停手（掉坑）"),
+        (8_000, 11_000, 8, Block::Solid, Block::Solid, 1, "前方是实心墙，没有矿 → 不硬走"),
+        (11_000, 13_000, 2, Block::Solid, Block::Lava, 1, "准星对着岩浆 → 绝对不挖"),
+        (13_000, 20_000, 2, Block::Solid, Block::Ore, 1, "恢复正常 → 继续挖"),
+        ];
+
+    println!("tick  phase   gather  why          move pitch atk   说明");
+    let mut last: Option<(Phase, trit_agent::gather::Mode, trit_agent::gather::Why, Tri, Tri, bool)> =
+        None;
+    let mut cur_pitch = 0.0f32;
+
+    for t in (0..=20_000).step_by(100) {
+        let sc = scenes
+            .iter()
+            .find(|s| t >= s.0 && t < s.1)
+            .copied()
+            .unwrap_or(scenes[scenes.len() - 1]);
+
+        // 快通道：100ms 一帧，含 1 帧延迟
+        a.ingest(
+            LogEvent::Sensor(SensorPatch {
+                pitch: Some(cur_pitch),
+                wall: Some(sc.5),
+                blk_front: Some(sc.4),
+                blk_below: Some(sc.3),
+                fast: true,
+                ..Default::default()
+            }),
+            t,
+        );
+        // 慢通道：1 秒一帧。矿在最后一段消失 —— 用它触发「挖掉一个」的计数。
+        if t % 1_000 == 0 {
+            // 17 秒时矿挖穿了。要等慢通道（1 秒一帧）报上来才知道，
+            // 所以「挖掉一个」的计数一定滞后 ≤1 秒 —— 这是感知频率的下限，
+            // 不是逻辑 bug。
+            let ore_tier = if t >= 17_000 { 0 } else { sc.2 };
+            a.ingest(
+                LogEvent::Sensor(SensorPatch {
+                    hp: Some(20.0),
+                    food: Some(18),
+                    pos: Some((0.0, 12.0, 0.0)),
+                    hostiles: Some(0),
+                    dist_tier: Some(0),
+                    hazard_tier: Some(0),
+                    ore_tier: Some(ore_tier),
+                    ore_dir: Some(0),
+                    tod: Some(6_000),
+                    ..Default::default()
+                }),
+                t,
+            );
+        }
+
+        let d = a.step(t, 5);
+        if d.dirs[Channel::Pitch.index()] != Tri::Zero {
+            cur_pitch += d.dirs[Channel::Pitch.index()].to_f32() * 5.5;
+            cur_pitch = cur_pitch.clamp(-90.0, 90.0);
+        }
+        let key = (
+            d.phase,
+            a.gather.mode,
+            a.gather.why,
+            d.dirs[Channel::Forward.index()],
+            d.dirs[Channel::Pitch.index()],
+            d.attack_hold,
+        );
+        if last != Some(key) || verbose {
+            println!(
+                "{:<5} {:<7} {:<7} {:<12} {:^4} {:^5} {:<5} {} [p={:>4.0}]",
+                t,
+                d.phase.name(),
+                a.gather.mode.name(),
+                a.gather.why.as_str(),
+                d.dirs[Channel::Forward.index()].ch(),
+                d.dirs[Channel::Pitch.index()].ch(),
+                if d.attack_hold {
+                    "按住"
+                } else if d.dirs[Channel::Attack.index()] == Tri::Pos {
+                    "点"
+                } else {
+                    "-"
+                },
+                sc.6,
+                cur_pitch
+            );
+            last = Some(key);
+        }
+    }
+
+    println!();
+    println!(
+        "共挖 {} 个，被打断 {} 次（最后一次：{}）",
+        a.gather.chopped,
+        a.gather.interrupted,
+        a.gather.interrupted_by.as_str()
+    );
+    println!(
+        "感知延迟实测 {:.0}ms —— 这个数进「推一下 → 停手等 → 再推」的等待时间，\n\
+         所以它直接决定瞄准要试几次。快通道 100ms 档大约是慢通道 1 秒档的三分之一。",
+        a.sense_gap_ms.unwrap_or(-1.0)
+    );
 }
 
 // ---------------------------------------------------------------- probe

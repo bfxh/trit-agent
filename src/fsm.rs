@@ -164,6 +164,29 @@ pub struct WorldView {
     pub wood: Option<f32>,
     /// 木头相对当前朝向的方位：`0` 正前，负左正右，单位 45°（范围 -3..=3）。
     pub wood_dir: Option<i32>,
+    /// 最近矿石的距离（格）。**None = 视野内没有**，不是「未知」。
+    ///
+    /// 和 `wood` 分开而不是合成一个「最近资源」：砍树和挖矿的门控判据不同
+    /// （挖矿还要求脚下有支撑、目标不是岩浆），合起来反而要在下游再拆开。
+    pub ore: Option<f32>,
+    pub ore_dir: Option<i32>,
+    /// 八方位墙体掩码，见 [`crate::perceive::wall_at`]。
+    ///
+    /// `None` = 快通道没开，**不知道有没有墙**。这个区分很重要：把「不知道」
+    /// 当成「没有墙」，AI 就会以全速撞上去然后原地推墙 —— 玩家看到的是
+    /// 「这 AI 傻了」，而实际原因是它压根没收到过这一维的数据。
+    pub wall: Option<u8>,
+    /// 准星正对的方块。挖矿挖的就是它。
+    pub blk_front: Option<crate::perceive::Block>,
+    /// 脚下踩着的方块。挖矿最怕的就是把这块挖了。
+    pub blk_below: Option<crate::perceive::Block>,
+    /// 正前方是一格高的台阶（能跳过去）吗？`None` = 不知道。
+    pub step: Option<bool>,
+    /// 实测的感知帧间隔（毫秒，滑动平均）。None = 还没量出来。
+    ///
+    /// 行为层拿它算「推一下视角之后要等多久」。写死数值两头不讨好：
+    /// 按 1 秒等，装了快通道也是白装；按 100ms 等，只有慢通道时一路转过头。
+    pub sense_gap_ms: Option<f32>,
     /// 是否夜晚。None = 不知道游戏内时间。
     pub night: Option<bool>,
     /// 视线俯仰角（度，负=下看）。None = 没读到。

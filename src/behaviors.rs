@@ -198,6 +198,13 @@ impl Behavior for IdleScan {
         if c.phase != Phase::Idle {
             return Vec::new();
         }
+        // 采集时不许乱转：走向目标那一段如果目标正好在正前方，Forage 不投 Yaw，
+        // 这时 IdleScan 的权重 3 就成了唯一一张票 —— 角色会一边走一边左右摆头，
+        // 走过去的方向全歪了。
+        if c.gather.active() {
+            self.sweep_at = c.now_ms + 1600;
+            return Vec::new();
+        }
         if c.now_ms >= self.sweep_at {
             self.side = self.side.not();
             self.sweep_at = c.now_ms + 1600;
@@ -398,6 +405,13 @@ impl Behavior for Breach {
             self.until = 0;
             return Vec::new();
         }
+        // 采集期间「卡住」是正常的：挖矿本来就不移动，`stuck` 判据一定成立。
+        // 这时候再让 Breach 插手，它会一边投票往下看一边按住左键，把采集的
+        // 瞄准闭环和挖掘进度全打乱 —— 表现出来是「AI 对着矿旁边那面墙猛挖」。
+        if c.gather.active() {
+            self.until = 0;
+            return Vec::new();
+        }
         if c.phase != Phase::Engage && c.phase != Phase::Idle {
             return Vec::new();
         }
@@ -528,12 +542,16 @@ impl Forage {
 
     /// 俯仰修正：推一下 → 停手等感知 → 再推。
     ///
-    /// 为什么不每拍都投：数据包 1 秒才报一次角度，而视线默认转 55°/s。
-    /// 一直投 `Pos` 的话，在这 1 秒的"看不见"区间里能转过头 55°，直接从
-    /// 树干冲到脚面甚至天花板，然后下一拍又往回转 —— 振荡，永远对不准。
+    /// 为什么不每拍都投：感知是等间隔的，而视线默认转 55°/s。一直投 `Pos`
+    /// 的话，在"看不见"的那段区间里能转过头一大截 —— 1 秒档时是 55°，
+    /// 直接从树干冲到脚面，然后下一拍又往回转，振荡，永远对不准。
     ///
     /// 所以按「角度差 ÷ 转速」算出这次该推多久，推完就停手，等新读数。
-    fn pitch_vote(&mut self, cur: Option<f32>, want: f32, now: u64) -> Option<Tri> {
+    ///
+    /// **等多久不写死**：写 900ms 的话装了快通道也白装（它 100ms 就有一帧），
+    /// 写 100ms 的话只有慢通道时一路转过头。所以用实测的帧间隔 `gap` 推：
+    /// 留 40% 余量，免得在"新帧还没到"的时候又推一次，两次推行叠成一个。
+    fn pitch_vote(&mut self, cur: Option<f32>, want: f32, now: u64, gap: Option<f32>) -> Option<Tri> {
         let dir = crate::gather::aim(cur, want)?;
         if now < self.pitch_until {
             return Some(dir); // 还在推，继续
@@ -544,9 +562,14 @@ impl Forage {
         let deg = (want - cur.unwrap_or(want)).abs();
         let burst = ((deg / self.look_rate) * 1000.0).clamp(80.0, 400.0) as u64;
         self.pitch_until = now + burst;
-        // 900ms 是数据包刷新（20 tick）+ 一点余量
-        self.pitch_next = now + burst + 900;
+        self.pitch_next = now + burst + Self::wait_ms(gap);
         Some(dir)
+    }
+
+    /// 推完之后要等多久才开始下一轮。
+    fn wait_ms(gap: Option<f32>) -> u64 {
+        let g = gap.unwrap_or(1_000.0).clamp(60.0, 1_400.0);
+        ((g * 1.4) as u64 + 30).clamp(90, 1_700)
     }
 }
 
@@ -562,39 +585,53 @@ impl Behavior for Forage {
     }
 
     fn vote(&mut self, c: &Ctx) -> Vec<Vote> {
+        use crate::gather::{Mode, Target};
         // 只在 Idle 阶段采集。交战/撤退时 phase 已经不是 Idle ——
         // 不需要在这里再写一遍"有威胁就停"，那是重复且容易漏的门控。
         if c.phase != Phase::Idle {
             return Vec::new();
         }
-        let dir = c.w.wood_dir.unwrap_or(0);
+        // 采什么由 mode 反推，不再单独存一份：`Mine` 就是挖矿，其余按砍树处理。
+        // 距离和方位都从 `c.w` 现取 —— 门控那一拍已经算过，这里只是同一份
+        // 世界观的另一种读法，避免两处各算一套然后对不上。
+        let target = match c.gather {
+            Mode::Mine => Target::Ore,
+            _ => Target::Wood,
+        };
+        let dir = target.dir(&c.w).unwrap_or(0);
+        let dist = target.dist(&c.w).unwrap_or(3.0);
+        let want_pitch = match target {
+            Target::Ore => crate::gather::aim_pitch(dist),
+            Target::Wood => crate::gather::PITCH_CHOP,
+        };
         match c.gather {
             // 冷却中让位：这时候应该走得越远越好，交给巡逻/撤退
-            crate::gather::Mode::Off | crate::gather::Mode::Cooldown => Vec::new(),
+            Mode::Off | Mode::Cooldown => Vec::new(),
 
             // 想采但安全窗口还没攒够：**站住等**，别顺手巡逻走开。
-            // 一走开木头就出视野了，等于每 2 秒重新开始。
-            crate::gather::Mode::Wait => {
+            // 一走开目标就出视野了，等于每 2 秒重新开始。
+            Mode::Wait => {
                 vec![Vote::abstain(Channel::Forward, 5, "forage_hold")]
             }
 
             // 插播扫视：停手、抬头、左右看。
-            crate::gather::Mode::Scan => {
+            Mode::Scan => {
                 if c.now_ms >= self.yaw_at {
                     self.yaw_side = self.yaw_side.not();
                     self.yaw_at = c.now_ms + 420;
                 }
-                let mut v = vec![Vote::new(Channel::Yaw, self.yaw_side, 4, "forage_scan")];
-                // 砍树时视线是往下的，扫视要抬回来才看得见远处。
-                // 用绝对角闭环，不瞎转 —— 否则扫一次可能一直抬到天花板。
-                if let Some(t) = self.pitch_vote(c.w.pitch, crate::gather::PITCH_SCAN, c.now_ms) {
-                    v.push(Vote::new(Channel::Pitch, t, 3, "forage_lookup"));
-                }
-                v
+                // 只水平扫，**不动视线俯仰**。
+                //
+                // 原来这里会把视线抬回 -8°，本意是"抬头看看远处有没有怪"。
+                // 但威胁不是靠看的 —— 数据包一直在报 16 格内的敌人数和距离档。
+                // 抬视线的唯一实际效果是把正在挖的方块丢掉，然后花大半秒重新
+                // 压回去：扫视 350ms + 重新对准 600ms，每 1.6 秒来一次，
+                // 等于一半时间在跟自己的视线较劲。
+                vec![Vote::new(Channel::Yaw, self.yaw_side, 4, "forage_scan")]
             }
 
             // 走过去。朝向只给方向，转多少由 look_rate 决定（每秒重测，闭环修正）。
-            crate::gather::Mode::Approach => {
+            Mode::Approach => {
                 // 权重 4 > patrol 的 3：采集时走采集的路，不是巡逻的路
                 let mut v = vec![Vote::new(Channel::Forward, Tri::Pos, 4, "forage_walk")];
                 if dir != 0 {
@@ -602,21 +639,41 @@ impl Behavior for Forage {
                     v.push(Vote::new(Channel::Yaw, yaw, 4, "forage_turn"));
                 }
                 // 平视：一边走一边低头会撞进水里 / 掉坑里
-                if let Some(t) = self.pitch_vote(c.w.pitch, crate::gather::PITCH_WALK, c.now_ms) {
+                if let Some(t) = self.pitch_vote(
+                    c.w.pitch,
+                    crate::gather::PITCH_WALK,
+                    c.now_ms,
+                    c.w.sense_gap_ms,
+                ) {
                     v.push(Vote::new(Channel::Pitch, t, 1, "forage_level"));
+                }
+                // 前方是一格高的台阶：跳过去。原版跳跃能上 1.25 格，
+                // 比"绕路"现实得多 —— 绕路需要路径规划，那是另一个量级的事。
+                //
+                // 只在 `step` 明确为真时跳。`wall` 为真而 `step` 未知时也跳：
+                // 撞上去之前跳一下没有代价，但站着不动会被看成卡死。
+                let ahead = c.w.wall.map(|w| crate::perceive::wall_at(w, 0)) == Some(true);
+                if ahead && c.w.step != Some(false) {
+                    v.push(Vote::new(Channel::Jump, Tri::Pos, 3, "forage_step_up"));
                 }
                 v
             }
 
-            // 砍。按住左键不放，视线压到树干高度。
-            crate::gather::Mode::Chop => {
-                let mut v = vec![Vote::hold(Channel::Attack, 5, "forage_chop")];
-                // 视线闭环压到树干高度。这一步不做的话，`Pos` 会一路转到脚面，
+            // 砍树 / 挖矿。按住左键不放，视线压到目标高度。
+            Mode::Chop | Mode::Mine => {
+                let tag = if c.gather == Mode::Mine { "mine" } else { "chop" };
+                let mut v = vec![Vote::hold(Channel::Attack, 5, tag)];
+                // 视线闭环压到目标高度。这一步不做的话，`Pos` 会一路转到脚面，
                 // 准星落在地面上，左键按着也只是在刨土。
-                if let Some(t) = self.pitch_vote(c.w.pitch, crate::gather::PITCH_CHOP, c.now_ms) {
+                //
+                // 砍树是固定 22°；挖矿按距离算 —— 脚边的矿和隔着三格的矿
+                // 需要的角度差一倍，写死一个值总有一边瞄不到。
+                if let Some(t) =
+                    self.pitch_vote(c.w.pitch, want_pitch, c.now_ms, c.w.sense_gap_ms)
+                {
                     v.push(Vote::new(Channel::Pitch, t, 3, "forage_aim_down"));
                 }
-                // 树干只有 1 格宽，走位会偏，时不时重新对一次
+                // 目标只有 1 格宽，走位会偏，时不时重新对一次
                 if dir != 0 {
                     let yaw = if dir < 0 { Tri::Neg } else { Tri::Pos };
                     v.push(Vote::new(Channel::Yaw, yaw, 3, "forage_aim"));

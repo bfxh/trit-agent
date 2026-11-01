@@ -126,19 +126,18 @@ fn death_event_is_classified_not_misfiled_as_chat() {
 // ---------------------------------------------------------------- 战法层
 
 fn sensor(hp: f32, hostiles: i32, tier: i32) -> LogEvent {
-    LogEvent::Sensor(trit_agent::perceive::Sensor {
-        hp,
-        food: 17,
-        x: 0.0,
-        y: 64.0,
-        z: 0.0,
-        hostiles,
-        dist_tier: tier,
-        hazard_tier: 0,
-        wood_tier: 0,
-        wood_dir: 0,
-        tod: 8_000,
-        pitch: 0.0,
+    LogEvent::Sensor(trit_agent::perceive::SensorPatch {
+        hp: Some(hp),
+        food: Some(17),
+        pos: Some((0.0, 64.0, 0.0)),
+        hostiles: Some(hostiles),
+        dist_tier: Some(tier),
+        hazard_tier: Some(0),
+        wood_tier: Some(0),
+        wood_dir: Some(0),
+        tod: Some(8_000),
+        pitch: Some(0.0),
+        ..Default::default()
     })
 }
 

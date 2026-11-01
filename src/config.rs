@@ -91,6 +91,14 @@ pub struct GatherCfg {
     /// 总开关。默认关 —— 采集会主动改变世界（砍掉你的树），
     /// 不该是默认行为。
     pub enabled: bool,
+    /// 采什么：木头还是矿石。两者的门控和瞄准都不同。
+    pub target: crate::gather::Target,
+    /// 会不会按需打开「快通道」（每 100ms 一帧的感知）。
+    ///
+    /// 打开后瞄准闭环的等待时间从 1 秒掉到 100ms 量级，代价是动手期间
+    /// 聊天框每秒刷 10 行。关掉它一切照常，只是瞄得慢、转视角会多试几次。
+    /// 需要 `squad_control = chat` 才有打字通道。
+    pub fast_bridge: bool,
     /// 血量低于这个比例就不采集。砍树时视线朝下、背对空地，挨打很难受。
     pub min_hp: f32,
     /// 饱食度低于等于这个值就不采集。饿着砍完跑不动，也不能回血。
@@ -121,6 +129,8 @@ impl Default for GatherCfg {
     fn default() -> Self {
         GatherCfg {
             enabled: false,
+            target: crate::gather::Target::Wood,
+            fast_bridge: true,
             min_hp: 0.65,
             min_food: 7,
             allow_night: false,
@@ -415,6 +425,12 @@ impl Config {
         if let Some(v) = g("gather_min_hp").and_then(|v| v.parse::<f32>().ok()) {
             c.gather.min_hp = v.clamp(0.1, 0.95);
         }
+        if let Some(v) = g("gather_target").and_then(|v| crate::gather::Target::parse(&v)) {
+            c.gather.target = v;
+        }
+        if let Some(v) = g("gather_fast_bridge").and_then(|v| parse_bool(&v)) {
+            c.gather.fast_bridge = v;
+        }
         if let Some(v) = g("gather_min_food").and_then(|v| v.parse::<i32>().ok()) {
             c.gather.min_food = v.clamp(0, 20);
         }
@@ -547,6 +563,12 @@ tac_breach = true
 # 默认关：采集会主动改变世界（砍掉你的树、砍掉你的房子）。
 # 打开后 AI 只在「明确安全」时动手，判据见 README「什么时候不该砍」。
 gather = false
+# 采什么：wood = 砍树，ore = 挖矿。换目标只改这一行。
+# 挖矿比砍树多三条判据：脚下要有支撑、目标不能是岩浆、前方被墙挡就换目标。
+gather_target = wood
+# 会不会按需打开快通道（每 100ms 一帧）。开了瞄准准，代价是动手期间
+# 聊天框每秒刷 10 行；不开也能用，只是瞄得慢。需要 squad_control = chat。
+gather_fast_bridge = true
 # 血低于这个比例就不砍（0.65 = 13 点血）
 gather_min_hp = 0.65
 # 饱食度低于等于这个数就不砍 —— 饿着砍完跑不动，也不能回血

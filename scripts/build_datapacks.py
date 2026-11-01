@@ -78,6 +78,39 @@ def validate_function_refs(name: str) -> list[str]:
     return problems
 
 
+BLOCK_TAG_REF = re.compile(r"#([a-z0-9_]+):([a-z0-9_/]+)")
+
+
+def validate_block_tags(name: str) -> list[str]:
+    """检查 mcfunction 里 `#ns:tag` 的方块标签引用是否真实存在。
+
+    和函数引用同理，但后果更隐蔽：写错一个字母，游戏不会报错，只会让
+    `if block ... #trit_bridge:solid` 永远为假 —— 表现是「AI 看不见墙」，
+    而不是「数据包坏了」。这种静默失败最耗时间，值得静态查一遍。
+
+    只校验本命名空间的标签；`#minecraft:*` / `#forge:*` 这些看不了。
+    """
+    src = SRC / name
+    data = src / "data"
+    ns_name = name
+    tdir = data / ns_name / "tags" / "blocks"
+    have = {p.stem for p in tdir.glob("*.json")} if tdir.is_dir() else set()
+
+    problems: list[str] = []
+    for p in data.rglob("*.mcfunction"):
+        text = p.read_text(encoding="utf-8", errors="replace")
+        body = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+        for m in BLOCK_TAG_REF.finditer(body):
+            if m.group(1) != ns_name:
+                continue
+            # `type=#ns:xxx` 是实体标签，不是方块标签，别误报
+            if body[: m.start()].endswith("type="):
+                continue
+            if m.group(2) not in have:
+                problems.append(f"{p.name} -> #{m.group(1)}:{m.group(2)}")
+    return problems
+
+
 def build_one(name: str) -> pathlib.Path:
     src = SRC / name
     out = DIST / f"{name}.zip"
@@ -142,9 +175,11 @@ def main() -> None:
         print(f"{name:<16} {z.stat().st_size / 1024:7.1f} KB  {flag}")
         for prob in validate_function_refs(name):
             warnings.append(f"{name}: {prob}")
+        for prob in validate_block_tags(name):
+            warnings.append(f"{name}: {prob}（方块标签）")
 
     if warnings:
-        print("\n函数引用有问题（游戏里会在调用那一刻才报错，建议先修）：")
+        print("\n引用有问题（游戏里不会报错，只会静默失效，建议先修）：")
         for w in warnings:
             print(f"  ! {w}")
 

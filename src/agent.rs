@@ -28,6 +28,8 @@ impl CommandSink for InputSink<'_> {
 const MIN_CLICK_MS: u64 = 70;
 /// 跳跃最少按住多久。
 const MIN_JUMP_MS: u64 = 90;
+/// 收手之后快通道再多留一会儿（毫秒）。见 `Agent::sync_fast_bridge`。
+const FAST_LINGER_MS: u64 = 2_500;
 /// 连续点重生超过这么多次就认为点不到，主动交还控制权。
 const MAX_RESPAWN_CLICKS: u32 = 12;
 /// 卡住判定的滑动窗口。
@@ -67,9 +69,38 @@ pub struct Agent {
     pub behaviors: Behaviors,
     pub input: Box<dyn Input>,
     pub tail: Option<LogTail>,
-    pub sensor: Option<Sensor>,
-    /// 最后一次收到传感器数据的时间。用来判断「这条消息有多旧」。
-    pub sensor_at: u64,
+    /// 最近一帧合并后的状态。两条通道（快 / 慢）都往这里补丁。
+    pub sensor: Sensor,
+    /// 最后一次收到传感器数据的时间。用 `Option` 而不是 0 当哨兵 ——
+    /// `now_ms` 真的可以是 0（测试和 sim 都从 0 开始），用 0 当"没收到过"
+    /// 会让「t=0 的第一帧」被当成「从没收到」。
+    pub sensor_at: Option<u64>,
+    /// 最后一帧**快通道**的时间。
+    ///
+    /// 不能拿 `sensor_at` 顶替：慢帧每秒也会刷新它，于是快通道关掉之后，
+    /// 墙体/方块那批字段看上去永远"新鲜"，实际内容是好几分钟前的 ——
+    /// 挖矿会拿着过期的「脚下是石头」继续挖，而脚下早就空了。
+    fast_at: Option<u64>,
+    /// 上一帧到达的时刻，用来实测两帧之间的间隔
+    last_frame_at: Option<u64>,
+    /// 感知延迟估计（毫秒，指数滑动平均）。
+    ///
+    /// 这个数决定「推一下视角之后要等多久才能再信传感器」。写死 900ms 的话，
+    /// 用户装了快通道也是白装；写死 100ms 的话，只有慢通道时会一路转过头。
+    /// 所以让它自己量。
+    pub sense_gap_ms: Option<f32>,
+    /// 快通道现在是开着的吗（由我们发的 `/function trit_bridge:fast_on` 决定）
+    fast_bridge_on: bool,
+    /// 快通道发过一次就记住能不能用：打不出命令的机器别每拍重试
+    fast_bridge_broken: bool,
+    /// 快通道「延迟关闭」的到期时刻。
+    ///
+    /// 为什么不是一收手就关：开关一次要打一整行命令，`type_command` 会阻塞
+    /// 300ms 并且清掉所有按键状态。收集一个 `wait → scan → chop` 的过程里
+    /// mode 会来回跳好几次，逐次开关等于每两秒卡一下 —— 比刷屏还难受。
+    fast_off_at: Option<u64>,
+    /// 快通道命令连续失败几次就放弃
+    fast_fail_count: u32,
 
     /* 感知状态 */
     pub hp: Option<f32>,
@@ -168,8 +199,15 @@ impl Agent {
             behaviors: Behaviors::new(&cfg),
             input,
             tail: None,
-            sensor: None,
-            sensor_at: 0,
+            sensor: Sensor::default(),
+            sensor_at: None,
+            fast_at: None,
+            last_frame_at: None,
+            sense_gap_ms: None,
+            fast_bridge_on: false,
+            fast_bridge_broken: false,
+            fast_off_at: None,
+            fast_fail_count: 0,
             hp: None,
             threat: Tri::Zero,
             threat_until: 0,
@@ -452,28 +490,60 @@ impl Agent {
     /// 处理一条游戏内事件。
     pub fn ingest(&mut self, ev: LogEvent, now_ms: u64) {
         match ev {
-            LogEvent::Sensor(s) => {
-                self.hp = Some(s.hp);
-                self.dead = s.hp <= 0.0;
-                self.dist_tier = s.dist_tier;
-                self.hazard_tier = s.hazard_tier;
-                self.hostiles = Some(s.hostiles.max(0) as u32);
-                // 敌人数和距离档任一非零都算有威胁：数据包的计数有半径上限，
-                // 而距离档是独立的几档判定，两边取并集才不会漏。
-                if s.hostiles > 0 || s.dist_tier > 0 {
-                    self.threat = Tri::Pos;
-                    self.threat_until = now_ms + 2500;
-                    self.contact_until = now_ms + 4000;
-                } else {
-                    self.threat = Tri::Neg;
-                    self.threat_until = now_ms + 1200;
+            LogEvent::Sensor(p) => {
+                // 先量延迟，再合并。顺序不能反：合并会改字段，但间隔只跟到达时刻有关。
+                if let Some(prev) = self.last_frame_at {
+                    let gap = now_ms.saturating_sub(prev) as f32;
+                    // 慢通道和快通道会撞在同一 tick（20 能被 2 整除），
+                    // 那一帧的间隔是 0 —— 混进去会把估计值一路拉到 0，
+                    // 于是等待时间变成 0，AI 开始疯狂转头。必须滤掉。
+                    if gap >= 20.0 {
+                        self.sense_gap_ms = Some(match self.sense_gap_ms {
+                            // 非对称：**变慢要立刻认，变快慢慢来**。
+                            //
+                            // 快通道一关，间隔从 100ms 跳到 1000ms。对称滤波要
+                            // 十几帧（十几秒）才追上，这十几秒里等待时间还是
+                            // 170ms 而帧其实 1 秒才来一次 —— 每一推都转过头。
+                            // 反过来变快时慢慢跟上没有坏处（不过是多等一点）。
+                            Some(v) if gap > v * 2.5 => gap,
+                            Some(v) => v * 0.7 + gap * 0.3,
+                            None => gap,
+                        });
+                    }
                 }
-                if s.hp > 0.5 {
-                    self.respawn_clicks = 0;
+                self.last_frame_at = Some(now_ms);
+                if p.fast {
+                    self.fast_at = Some(now_ms);
                 }
-                self.track_motion(s.x, s.y, s.z, now_ms);
-                self.sensor_at = now_ms;
-                self.sensor = Some(s);
+
+                let was_first = self.sensor_at.is_none();
+                self.sensor.apply(&p);
+                // 只有慢通道带血量和坐标，别让快通道把「活着」这件事反复确认
+                if !p.fast {
+                    self.hp = Some(self.sensor.hp);
+                    self.dead = self.sensor.hp <= 0.0;
+                    self.dist_tier = self.sensor.dist_tier;
+                    self.hazard_tier = self.sensor.hazard_tier;
+                    self.hostiles = Some(self.sensor.hostiles.max(0) as u32);
+                    // 敌人数和距离档任一非零都算有威胁：数据包的计数有半径上限，
+                    // 而距离档是独立的几档判定，两边取并集才不会漏。
+                    if self.sensor.hostiles > 0 || self.sensor.dist_tier > 0 {
+                        self.threat = Tri::Pos;
+                        self.threat_until = now_ms + 2500;
+                        self.contact_until = now_ms + 4000;
+                    } else {
+                        self.threat = Tri::Neg;
+                        self.threat_until = now_ms + 1200;
+                    }
+                    if self.sensor.hp > 0.5 {
+                        self.respawn_clicks = 0;
+                    }
+                    self.track_motion(self.sensor.x, self.sensor.y, self.sensor.z, now_ms);
+                } else if was_first {
+                    // 只有快通道在跑（慢通道还没到）：至少得知道别拿默认血量当真
+                    self.hp = None;
+                }
+                self.sensor_at = Some(now_ms);
             }
             LogEvent::HealthProbe(h) => {
                 self.hp = Some(h);
@@ -585,7 +655,7 @@ impl Agent {
                 self.tactics_line(),
                 self.strategy_line(),
                 self.squad.line(self.cfg.squad_control.as_str()),
-                self.gather.line()
+                self.gather.line(&self.cfg.gather)
             ),
             "squad" => match arg.as_str() {
                 "" => self.squad.line(self.cfg.squad_control.as_str()),
@@ -643,10 +713,10 @@ impl Agent {
                 }
             },
             "gather" => match arg.as_str() {
-                "" => self.gather.line(),
+                "" => self.gather.line(&self.cfg.gather),
                 "on" | "1" => {
                     self.cfg.gather.enabled = true;
-                    format!("gather on ({})", self.gather.line())
+                    format!("gather on ({})", self.gather.line(&self.cfg.gather))
                 }
                 "off" | "0" => {
                     self.cfg.gather.enabled = false;
@@ -665,12 +735,44 @@ impl Agent {
                         if self.cfg.gather.allow_night { "on" } else { "off" }
                     )
                 }
+                // 换目标：砍树 / 挖矿。换的时候必须清状态 —— 上一趟的配额和
+                // 「正在砍第几棵」对新的目标毫无意义，留着只会让计数莫名其妙。
+                "wood" | "tree" | "木" => {
+                    self.cfg.gather.target = crate::gather::Target::Wood;
+                    self.gather.reset();
+                    format!("gather target ({})", self.gather.line(&self.cfg.gather))
+                }
+                "ore" | "mine" | "矿" => {
+                    self.cfg.gather.target = crate::gather::Target::Ore;
+                    self.gather.reset();
+                    format!("gather target ({})", self.gather.line(&self.cfg.gather))
+                }
+                "fast" => {
+                    self.cfg.gather.fast_bridge = !self.cfg.gather.fast_bridge;
+                    format!(
+                        "gather fast {}",
+                        if self.cfg.gather.fast_bridge { "on" } else { "off" }
+                    )
+                }
+                // 实测感知延迟。这是判断「数据包到底装没装上 / 快通道开没开」
+                // 的唯一办法 —— 光看日志里有没有 <TRITF 也行，但这个更直接。
+                "lag" => format!(
+                    "感知 {:.0}ms 一帧（快通道 {}）",
+                    self.sense_gap_ms.unwrap_or(-1.0),
+                    if self.fast_bridge_on {
+                        "开"
+                    } else if self.fast_bridge_broken {
+                        "坏"
+                    } else {
+                        "关"
+                    }
+                ),
                 other => {
                     if let Ok(v) = other.parse::<u32>() {
                         self.cfg.gather.quota = v.min(1_000);
                         format!("gather quota {}", self.cfg.gather.quota)
                     } else {
-                        "? !gather on|off|reset|night|<配额>".to_string()
+                        "? !gather on|off|reset|night|wood|ore|fast|lag|<配额>".to_string()
                     }
                 }
             },
@@ -720,11 +822,25 @@ impl Agent {
         // 出问题了（卡死 / 关掉了 / 退出世界）。这时候宁可让「木头位置」变成
         // 未知，也不能拿旧坐标一路砍 —— 会对着空气挥 20 秒。
         let fresh = |now_ms: u64| -> Option<&Sensor> {
-            self.sensor
-                .as_ref()
-                .filter(|_| now_ms.saturating_sub(self.sensor_at) < 3_000)
+            let at = self.sensor_at?;
+            if now_ms.saturating_sub(at) < self.sense_stale_ms() {
+                Some(&self.sensor)
+            } else {
+                None
+            }
         };
         let sn = fresh(now_ms);
+
+        // 墙壁 / 方块的保鲜期比整帧短得多：快通道 100ms 一帧，停更 800ms 就
+        // 说明「AI 刚才关了快通道」或者「游戏卡了」。这两种情况都不能拿旧掩码
+        // 去判断"前面没有墙" —— 那会让 AI 一头撞上去。
+        let blk = {
+            let at = self.fast_at;
+            match at {
+                Some(at) if now_ms.saturating_sub(at) < 800 => Some(&self.sensor),
+                _ => None,
+            }
+        };
 
         WorldView {
             hp: self.hp.map(|h| (h / 20.0).clamp(0.0, 1.0)),
@@ -736,14 +852,27 @@ impl Agent {
             food: sn.map(|s| s.food),
             wood: sn.and_then(|s| crate::gather::wood_dist(s.wood_tier)),
             wood_dir: sn.map(|s| s.wood_dir),
+            ore: sn.and_then(|s| crate::gather::ore_dist(s.ore_tier)),
+            ore_dir: sn.map(|s| s.ore_dir),
             night: sn.and_then(|s| s.is_night()),
             pitch: sn.map(|s| s.pitch),
+            wall: blk.and_then(|s| s.wall),
+            blk_front: blk.and_then(|s| s.blk_front),
+            blk_below: blk.and_then(|s| s.blk_below),
+            step: blk.and_then(|s| s.step),
+            sense_gap_ms: self.sense_gap_ms,
             stuck: self.stuck,
             pos: self.pos_last,
             dead: self.dead,
             human_takeover: !self.armed,
             tick,
         }
+    }
+
+    /// 「多久没收到数据就算数据过期」。跟着实测间隔走，别写死。
+    fn sense_stale_ms(&self) -> u64 {
+        let gap = self.sense_gap_ms.unwrap_or(1_000.0);
+        (gap * 3.0).clamp(1_200.0, 5_000.0) as u64
     }
 
     pub fn step(&mut self, now_ms: u64, dt_ms: u64) -> Decision {
@@ -758,7 +887,7 @@ impl Agent {
 
         let mut w = self.world(self.machine.ticks, now_ms);
         // 无感知时的显式「无脑模式」：只有配置里自己开了才允许猜
-        if self.cfg.assume_threat && self.sensor.is_none() && self.armed {
+        if self.cfg.assume_threat && self.sensor_at.is_none() && self.armed {
             w.threat = Tri::Pos;
             w.contact = true;
         }
@@ -783,6 +912,9 @@ impl Agent {
         // 放在行为投票之前，是因为它可能要打字发指令（阻塞 ~300ms），
         // 打完字按键状态必须重置，否则这一拍的 apply 会以为键还按着。
         self.drive_squad(&w, now_ms);
+        // 快通道开关。放在行为投票之前：如果这一拍要打字，按键状态在
+        // apply 之前就已经被清掉了，不会出现"以为按着其实没按"。
+        self.sync_fast_bridge(now_ms);
 
         let mut votes: Vec<Vote> = self.behaviors.vote(&ctx);
         // 战法层只追加票，不改别人投的票
@@ -826,6 +958,70 @@ impl Agent {
         }
     }
 
+    /// 按需开关快通道（每 100ms 一帧的那条）。
+    ///
+    /// 只在「真的要动手」那几秒开：`Approach` / `Chop` / `Mine` / `Scan` 都需要
+    /// 100ms 级的瞄准反馈；`Wait` / `Off` / `Cooldown` 站在那儿什么都不干，
+    /// 开着只是拿每秒 10 行去刷玩家的聊天框。
+    ///
+    /// 关的是「延迟关」：收手后再等 `FAST_LINGER_MS` 才真正发关闭命令。
+    /// 采集一趟里 mode 会来回跳（wait → scan → chop → scan …），逐次开关每次
+    /// 都要打一行命令阻塞 300ms，手感比刷屏还差。
+    fn sync_fast_bridge(&mut self, now_ms: u64) {
+        if !self.cfg.gather.fast_bridge || self.fast_bridge_broken {
+            return;
+        }
+        // 只有聊天通道能往游戏里打字。dry 模式是给测试和无游戏环境用的，
+        // 真去打字反而会打到别的窗口上。
+        if !matches!(self.cfg.squad_control, ControlChannel::Chat) {
+            return;
+        }
+        let wanted = self.armed
+            && self.cfg.gather.enabled
+            && matches!(
+                self.gather.mode,
+                crate::gather::Mode::Approach
+                    | crate::gather::Mode::Chop
+                    | crate::gather::Mode::Mine
+                    | crate::gather::Mode::Scan
+            );
+
+        if wanted {
+            self.fast_off_at = None;
+            if self.fast_bridge_on {
+                return;
+            }
+            self.send_bridge_cmd("/function trit_bridge:fast_on", true);
+        } else if self.fast_bridge_on {
+            let at = *self.fast_off_at.get_or_insert(now_ms + FAST_LINGER_MS);
+            if now_ms >= at {
+                self.fast_off_at = None;
+                self.send_bridge_cmd("/function trit_bridge:fast_off", false);
+            }
+        }
+    }
+
+    fn send_bridge_cmd(&mut self, cmd: &str, on: bool) {
+        let mut sink = InputSink(&mut *self.input);
+        let sent = sink.send(cmd);
+        // 打字会松开所有键，Agent 自己的缓存必须跟着清，否则下一拍
+        // `set_key_w(true)` 以为键还按着，实际没按 —— 角色原地不动。
+        self.reset_key_state();
+        if sent {
+            self.fast_bridge_on = on;
+            self.fast_fail_count = 0;
+        } else {
+            // 连续失败多半是「游戏不在前台」之外的持久问题（窗口没找到、
+            // 输入法拦截）。失败三次就放弃，别每两秒卡 300ms 试一次。
+            self.fast_fail_count += 1;
+            if self.fast_fail_count >= 3 {
+                self.fast_bridge_broken = true;
+                self.fast_bridge_on = false;
+                println!("[gather] 快通道开关失败 3 次，放弃（感知回落到 1 秒档）");
+            }
+        }
+    }
+
     /// 忘掉「按键状态」的缓存，让下一拍 apply 重新按一遍。
     fn reset_key_state(&mut self) {
         self.key_w = false;
@@ -841,6 +1037,16 @@ impl Agent {
     /// `squad_control = dry` 时已经下发的指令（给 `!squad` 和测试用）。
     pub fn squad_log(&self) -> &[String] {
         &self.dry_cmd.log
+    }
+
+    /// 快通道状态：(现在开着吗, 已经放弃了吗, 实测帧间隔)。
+    /// 给 `!gather lag` 和测试用。
+    pub fn fast_bridge(&self) -> (bool, bool, Option<f32>) {
+        (
+            self.fast_bridge_on,
+            self.fast_bridge_broken,
+            self.sense_gap_ms,
+        )
     }
 
     /// 当前生效的战法（给 `!strat` 和测试用）。
@@ -1031,6 +1237,8 @@ impl Agent {
         let mut attacks: u64 = 0;
         let mut phase_hist = [0u64; 5];
         let mut last_log = start;
+        // 日志事件缓冲，循环外建一次，之后每拍 clear 复用
+        let mut log_events: Vec<LogEvent> = Vec::with_capacity(32);
 
         let kv = self.cfg.kill_switch_vk;
         let pv = self.cfg.panic_vk;
@@ -1101,11 +1309,15 @@ impl Agent {
             // 日志不用每 tick 读，50ms 一次足够
             if now.duration_since(last_log) >= Duration::from_millis(50) {
                 last_log = now;
-                let events = match self.tail.as_mut() {
-                    Some(t) => t.poll(),
-                    None => Vec::new(),
-                };
-                for ev in events {
+                // 复用事件缓冲：这条路径每 50ms 跑一次，且会把整批事件推完
+                // 才回到这里。每拍新建一个 Vec 在这个频率上是纯浪费。
+                log_events.clear();
+                if let Some(t) = self.tail.as_mut() {
+                    t.poll_into(&mut log_events);
+                }
+                // 用 `for ... in &` 而不是 `for ... in`：事件是借用，
+                // 缓冲留在本作用域里，下一拍直接 clear 复用。
+                for ev in log_events.drain(..) {
                     self.ingest(ev, now_ms);
                 }
             }
@@ -1183,19 +1395,17 @@ mod tests {
 
     /// 同上，但指定坐标和爆炸源档。
     fn sens_at(hp: f32, hostiles: i32, d: i32, x: f32, z: f32, c: i32) -> LogEvent {
-        LogEvent::Sensor(Sensor {
-            hp,
-            food: 17,
-            x,
-            y: 64.0,
-            z,
-            hostiles,
-            dist_tier: if hostiles > 0 { d } else { 0 },
-            hazard_tier: c,
-            wood_tier: 0,
-            wood_dir: 0,
-            tod: 8_000,
-            pitch: 0.0,
+        LogEvent::Sensor(crate::perceive::SensorPatch {
+            hp: Some(hp),
+            food: Some(17),
+            pos: Some((x, 64.0, z)),
+            hostiles: Some(hostiles),
+            dist_tier: Some(if hostiles > 0 { d } else { 0 }),
+            hazard_tier: Some(c),
+            wood_tier: Some(0),
+            wood_dir: Some(0),
+            tod: Some(8_000),
+            ..Default::default()
         })
     }
 
@@ -1203,9 +1413,44 @@ mod tests {
     fn sens_wood(hp: f32, tier: i32, dir: i32, tod: i32) -> LogEvent {
         match sens(hp, 0, 0) {
             LogEvent::Sensor(mut s) => {
-                s.wood_tier = tier;
-                s.wood_dir = dir;
-                s.tod = tod;
+                s.wood_tier = Some(tier);
+                s.wood_dir = Some(dir);
+                s.tod = Some(tod);
+                LogEvent::Sensor(s)
+            }
+            other => other,
+        }
+    }
+
+    /// 快通道帧：墙体掩码 / 准星方块 / 脚下方块 / 俯仰角。
+    fn sens_fast(wall: u8, front: crate::perceive::Block, below: crate::perceive::Block, pitch: f32) -> LogEvent {
+        LogEvent::Sensor(crate::perceive::SensorPatch {
+            wall: Some(wall),
+            blk_front: Some(front),
+            blk_below: Some(below),
+            pitch: Some(pitch),
+            fast: true,
+            ..Default::default()
+        })
+    }
+
+    /// 给一帧快通道补上「前方是台阶」这一位。
+    fn with_step(ev: LogEvent, step: bool) -> LogEvent {
+        match ev {
+            LogEvent::Sensor(mut p) => {
+                p.step = Some(step);
+                LogEvent::Sensor(p)
+            }
+            other => other,
+        }
+    }
+
+    /// 指定「附近有没有矿」的传感器事件。档位 0/2/4/8。
+    fn sens_ore(hp: f32, tier: i32, dir: i32) -> LogEvent {
+        match sens(hp, 0, 0) {
+            LogEvent::Sensor(mut s) => {
+                s.ore_tier = Some(tier);
+                s.ore_dir = Some(dir);
                 LogEvent::Sensor(s)
             }
             other => other,
@@ -1345,6 +1590,319 @@ mode = hold
         assert_eq!(a.gather.mode, crate::gather::Mode::Approach);
         assert!(a.key_w, "6 格就该往那边走");
         assert!(!a.btn_left, "还没到就砍是白挥");
+    }
+
+    // ---- 墙壁 / 挖矿 / 感知延迟 ----
+
+    fn miner() -> Agent {
+        let cfg = Config::from_str("hz = 200
+gather = true
+gather_target = ore
+mode = hold
+");
+        let mut a = Agent::new(cfg, Box::new(DryInput::new()));
+        a.arm(true);
+        a
+    }
+
+    /// 推进一段时间，每 100ms 补一帧快通道、每 500ms 补一帧慢通道。
+    ///
+    /// 快通道单独补是必需的：墙体 / 方块数据只有快帧才有，而 `world()`
+    /// 给它们 800ms 的保鲜期 —— 只补慢帧的话 `wall` 永远是 `None`，
+    /// 测出来的全是"不知道"，什么也验证不了。
+    fn pump_mine(
+        a: &mut Agent,
+        from: u64,
+        to: u64,
+        ore: i32,
+        below: crate::perceive::Block,
+        front: crate::perceive::Block,
+        wall: u8,
+    ) -> Decision {
+        let mut t = from;
+        let mut d = a.step(t, 5);
+        while t < to {
+            if t % 100 == 0 {
+                a.ingest(sens_fast(wall, front, below, 0.0), t);
+            }
+            if t % 500 == 0 {
+                a.ingest(sens_ore(20.0, ore, 0), t);
+            }
+            t += 50;
+            d = a.step(t, 5);
+        }
+        d
+    }
+
+    #[test]
+    fn agent_steps_up_when_the_wall_is_right_in_front() {
+        // 前方 1 格是固体 → 走过去那一步要跳，不能原地推墙
+        let mut a = forager();
+        let mut t = 0u64;
+        let mut jumped = false;
+        while t < 4_000 {
+            if t % 100 == 0 {
+                // 一格高的台阶：前面有固体，上面没有 → 能跳过去
+                a.ingest(
+                    with_step(
+                        sens_fast(1, crate::perceive::Block::Solid, crate::perceive::Block::Solid, 0.0),
+                        true,
+                    ),
+                    t,
+                );
+            }
+            if t % 500 == 0 {
+                // 木头 6 格，够不着 → 处于 Approach
+                a.ingest(sens_wood(20.0, 6, 0, 8_000), t);
+            }
+            let d = a.step(t, 5);
+            if d.dirs[Channel::Jump.index()] == Tri::Pos {
+                jumped = true;
+            }
+            t += 50;
+        }
+        assert_eq!(a.gather.mode, crate::gather::Mode::Approach);
+        assert!(jumped, "前方顶着一格墙却从不跳，只会原地推墙");
+    }
+
+    #[test]
+    fn agent_mines_ore_and_holds_the_button() {
+        let mut a = miner();
+        let d = pump_mine(
+            &mut a,
+            0,
+            4_000,
+            2,
+            crate::perceive::Block::Solid,
+            crate::perceive::Block::Ore,
+            0,
+        );
+        assert_eq!(
+            a.gather.mode,
+            crate::gather::Mode::Mine,
+            "why={:?}",
+            a.gather.why
+        );
+        assert_eq!(d.dirs[Channel::Attack.index()], Tri::Pos);
+        assert!(d.attack_hold, "挖方块必须按住，脉冲式永远挖不穿");
+        assert!(a.btn_left && a.btn_left_hold);
+    }
+
+    #[test]
+    fn agent_refuses_to_mine_with_no_floor() {
+        // 脚下是空 = 悬空。挖下去就是掉进自己挖的坑，直接不干。
+        let mut a = miner();
+        pump_mine(
+            &mut a,
+            0,
+            4_000,
+            2,
+            crate::perceive::Block::Empty,
+            crate::perceive::Block::Ore,
+            0,
+        );
+        assert_eq!(a.gather.why, crate::gather::Why::NoFloor);
+        assert_ne!(a.gather.mode, crate::gather::Mode::Mine);
+        assert!(!a.btn_left, "悬空还按着左键 = 自杀");
+    }
+
+    #[test]
+    fn wall_that_belongs_to_the_ore_is_not_a_blocked_path() {
+        // 挖矿时正前方就是矿石，它当然是固体。要是把它当墙，AI 会自己
+        // 把自己拦下来，永远不开始挖。
+        let mut a = miner();
+        pump_mine(
+            &mut a,
+            0,
+            4_000,
+            8,
+            crate::perceive::Block::Solid,
+            crate::perceive::Block::Ore,
+            1,
+        );
+        assert_eq!(
+            a.gather.mode,
+            crate::gather::Mode::Approach,
+            "why={:?} note={}",
+            a.gather.why,
+            a.gather.wall_note
+        );
+    }
+
+    #[test]
+    fn sense_gap_tracks_the_fast_channel() {
+        // 100ms 一帧的时候，测出来的间隔就该在 100 附近 ——
+        // 这个数直接进「推一下等多久」，估错了就是转过头或站着干等。
+        let mut a = miner();
+        pump_mine(
+            &mut a,
+            0,
+            3_000,
+            2,
+            crate::perceive::Block::Solid,
+            crate::perceive::Block::Ore,
+            0,
+        );
+        let (_, _, gap) = a.fast_bridge();
+        let gap = gap.expect("应该已经量出帧间隔");
+        assert!((gap - 100.0).abs() < 25.0, "实测 {gap}ms，期望约 100ms");
+    }
+
+    #[test]
+    fn sense_gap_falls_back_to_the_slow_channel() {
+        // 只有慢通道（1 秒一帧）时，测出来就该是 1000 左右 ——
+        // 拿 100ms 去等慢通道会一路转过头。
+        let mut a = miner();
+        let mut t = 0u64;
+        while t < 3_000 {
+            if t % 1_000 == 0 {
+                a.ingest(sens_ore(20.0, 2, 0), t);
+            }
+            a.step(t, 5);
+            t += 50;
+        }
+        let (_, _, gap) = a.fast_bridge();
+        let gap = gap.expect("应该已经量出帧间隔");
+        assert!((gap - 1_000.0).abs() < 120.0, "实测 {gap}ms，期望约 1000ms");
+    }
+
+    #[test]
+    fn stale_block_data_is_dropped_when_the_fast_channel_stops() {
+        // 回归：`blk` 一开始用 `sensor_at` 判新鲜度，而慢帧每秒也刷新它 ——
+        // 于是快通道关掉之后，墙体和方块字段看上去永远"新鲜"，
+        // 挖矿会拿着几分钟前的「脚下是石头」继续挖，而脚下早就空了。
+        let mut a = miner();
+        pump_mine(
+            &mut a,
+            0,
+            3_000,
+            2,
+            crate::perceive::Block::Solid,
+            crate::perceive::Block::Ore,
+            0,
+        );
+        let w = a.world(0, 2_950);
+        assert_eq!(
+            w.blk_below,
+            Some(crate::perceive::Block::Solid),
+            "快通道还在的时候应该拿得到"
+        );
+
+        // 快通道关掉，只剩 1 秒一帧的慢帧
+        let mut t = 3_000u64;
+        while t < 4_500 {
+            if t % 500 == 0 {
+                a.ingest(sens_ore(20.0, 2, 0), t);
+            }
+            a.step(t, 5);
+            t += 50;
+        }
+        let w = a.world(0, 4_400);
+        assert_eq!(w.blk_below, None, "快通道停了 800ms 之后，方块数据必须变成未知");
+        assert_eq!(w.ore, Some(2.0), "慢通道还在，矿的位置照常可用");
+    }
+
+    #[test]
+    fn sense_gap_snaps_up_when_frames_get_slower() {
+        // 回归：对称的滑动平均在「快通道一关、间隔从 100 跳到 1000」时
+        // 要十几帧才追上，这十几秒里等待时间还是 170ms 而帧其实 1 秒才来一次。
+        let mut a = miner();
+        pump_mine(
+            &mut a,
+            0,
+            3_000,
+            2,
+            crate::perceive::Block::Solid,
+            crate::perceive::Block::Ore,
+            0,
+        );
+        let fast = a.fast_bridge().2.unwrap();
+        assert!(fast < 200.0, "快通道一帧 {fast}ms，不对");
+
+        let mut t = 3_000u64;
+        while t < 6_000 {
+            if t % 1_000 == 0 {
+                a.ingest(sens_ore(20.0, 2, 0), t);
+            }
+            a.step(t, 5);
+            t += 50;
+        }
+        let slow = a.fast_bridge().2.unwrap();
+        assert!(
+            slow > 600.0,
+            "间隔变大必须立刻认（实测 {slow}ms），否则这十几秒里每一推都转过头"
+        );
+    }
+
+    #[test]
+    fn fast_bridge_turns_on_only_while_working() {
+        let cfg = Config::from_str("hz = 200
+gather = true
+gather_target = ore
+squad_control = chat
+mode = hold
+");
+        let mut a = Agent::new(cfg, Box::new(DryInput::new()));
+        a.arm(true);
+        // 一开始没动手：不该开快通道（每秒刷 10 行是玩家的痛点）
+        a.step(0, 5);
+        assert!(!a.fast_bridge().0, "还没动手就开快通道 = 白刷屏");
+
+        let mut t = 0u64;
+        while t < 4_000 {
+            if t % 100 == 0 {
+                a.ingest(
+                    sens_fast(0, crate::perceive::Block::Ore, crate::perceive::Block::Solid, 0.0),
+                    t,
+                );
+            }
+            if t % 500 == 0 {
+                a.ingest(sens_ore(20.0, 2, 0), t);
+            }
+            a.step(t, 5);
+            t += 50;
+        }
+        assert!(
+            a.fast_bridge().0,
+            "正在挖矿却不提升感知频率，瞄不准（mode={:?} chat={:?} fb={} broken={}）",
+            a.gather.mode,
+            a.cfg.squad_control,
+            a.cfg.gather.fast_bridge,
+            a.fast_bridge().1
+        );
+
+        // 收手之后延迟关（不是立刻关，避免 mode 抖动时反复打字）
+        let mut t = 4_000u64;
+        while t < 9_000 {
+            if t % 500 == 0 {
+                a.ingest(sens_ore(20.0, 0, 0), t); // 矿没了
+            }
+            a.step(t, 5);
+            t += 50;
+        }
+        assert!(!a.fast_bridge().0, "早就不挖了还开着，白刷屏");
+    }
+
+    #[test]
+    fn fast_bridge_stays_off_without_a_chat_channel() {
+        // dry / off 通道下没有打字路径，硬开只会把键打到别的窗口上
+        let mut a = miner();
+        let mut t = 0u64;
+        while t < 4_000 {
+            if t % 100 == 0 {
+                a.ingest(
+                    sens_fast(0, crate::perceive::Block::Ore, crate::perceive::Block::Solid, 0.0),
+                    t,
+                );
+            }
+            if t % 500 == 0 {
+                a.ingest(sens_ore(20.0, 2, 0), t);
+            }
+            a.step(t, 5);
+            t += 50;
+        }
+        assert!(!a.fast_bridge().0);
+        assert!(!a.fast_bridge().1, "没通道不算「坏」，别记仇");
     }
 
     #[test]

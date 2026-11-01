@@ -1,6 +1,6 @@
 {
   "pack": {
     "pack_format": 9,
-    "description": "trit-agent 传感器：状态写进聊天，供外部读取"
+    "description": "trit-agent 传感器：快慢双通道状态流，供外部读取"
   }
 }
