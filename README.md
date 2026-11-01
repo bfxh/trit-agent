@@ -736,11 +736,22 @@ python scripts/check_env.py --profile "E:/MC/MC/profiles/烦人的村民"
 进游戏 `/reload`，然后：
 
 ```
-/function trit_bridge:on       # 开慢通道（默认关，因为会占聊天框）
+/function trit_bridge:on       # 开慢通道（load 里已默认打开；手动关过就用这条开回来）
 /function trit_bridge:off
 /function trit_bridge:fast_on  # 开快通道（AI 自己会调，手动开只是为了调试）
 /function trit_bridge:fast_off
 ```
+
+> **曾经踩过的坑（默认值原来写反了）**
+>
+> 慢通道总开关 `on` 的默认值一度是 `0`，理由是「tellraw 刷聊天框」。
+> 但 AI 的感知**完全**走这一条通道：开关一关，`tellraw` 一行都不出，
+> 日志里搜 `TRIT` 是 0 条，于是墙的方位、敌人距离、脚下是什么全是 `None`。
+> 按三值原则「未知不猜」，AI 就一直站桩 —— 表现正是「AI 看不见墙壁」。
+>
+> 现在默认改成 `1`（每秒一行），并且用 `#inited` 记「已经给过默认值」，
+> 这样你手动关掉以后 `/reload` 不会又给你打开。
+> 快通道 `fo` 仍然默认关：它每 100ms 刷一行，只在采集时由 Rust 侧临时开。
 
 慢通道每秒一行、快通道每 100ms 一行：
 

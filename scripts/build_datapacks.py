@@ -473,8 +473,8 @@ def main() -> None:
         only = {x.strip() for x in args.only.split(",") if x.strip()} if args.only else None
         install(profile, only)
 
-    print("\n提示：进入世界后执行 /reload；传感器默认关闭，需要时执行")
-    print("      /function trit_bridge:on")
+    print("\n提示：进入世界后执行 /reload。传感器已在 load 里默认打开，")
+    print("      想关就执行 /function trit_bridge:off。")
 
 
 if __name__ == "__main__":
