@@ -1,5 +1,1 @@
-/target
-/dist
-/trit-agent.toml
-/trit-agent-run.log
-*.log
+/.workbuddy/
