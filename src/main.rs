@@ -111,6 +111,9 @@ fn load_cfg(flags: &Flags) -> Config {
     if let Some(p) = flags.get("log") {
         cfg.log_path = PathBuf::from(p);
     }
+    if let Some(profile) = flags.get("profile") {
+        cfg.log_path = PathBuf::from(profile).join("logs").join("latest.log");
+    }
     if let Some(m) = flags.get("mode") {
         cfg.mode = Config::from_str(&format!("mode = {m}")).mode;
     }

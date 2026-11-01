@@ -40,7 +40,6 @@ pub struct Channels {
     pub attack: bool,
     pub jump: bool,
     pub use_item: bool,
-    pub hotbar: bool,
 }
 
 impl Default for Channels {
@@ -51,7 +50,6 @@ impl Default for Channels {
             attack: true,
             jump: true,
             use_item: true,
-            hotbar: true,
         }
     }
 }
@@ -209,9 +207,6 @@ impl Config {
         if let Some(v) = g("ch_use").and_then(|v| parse_bool(&v)) {
             c.channels.use_item = v;
         }
-        if let Some(v) = g("ch_hotbar").and_then(|v| parse_bool(&v)) {
-            c.channels.hotbar = v;
-        }
         c
     }
 }
@@ -280,7 +275,6 @@ ch_look = true
 ch_attack = true
 ch_jump = true
 ch_use = true
-ch_hotbar = true
 
 # 战斗节奏
 attack_interval_ms = 620

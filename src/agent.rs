@@ -10,6 +10,13 @@ use crate::trit::Tri;
 use std::io::Write;
 use std::time::{Duration, Instant};
 
+/// 一次点击最少按住多久（毫秒）。16ms 一帧，70ms 保证跨 3~4 帧。
+const MIN_CLICK_MS: u64 = 70;
+/// 跳跃最少按住多久。
+const MIN_JUMP_MS: u64 = 90;
+/// 连续点重生超过这么多次就认为点不到，主动交还控制权。
+const MAX_RESPAWN_CLICKS: u32 = 12;
+
 pub struct RunStats {
     pub ticks: u64,
     pub elapsed: Duration,
@@ -44,6 +51,12 @@ pub struct Agent {
     key_shift: bool,
     btn_left: bool,
     btn_right: bool,
+    // 一次按下至少要持续这么久才松开。游戏输入按帧采样（~16ms），
+    // 5ms 的按键脉冲有很大概率整帧漏掉，表现就是「AI 不攻击」。
+    btn_left_until: u64,
+    btn_right_until: u64,
+    space_until: u64,
+    respawn_clicks: u32,
 
     /* 连续量做累加，避免每帧取整丢精度 */
     yaw_px: f32,
@@ -91,6 +104,10 @@ impl Agent {
             key_shift: false,
             btn_left: false,
             btn_right: false,
+            btn_left_until: 0,
+            btn_right_until: 0,
+            space_until: 0,
+            respawn_clicks: 0,
             yaw_px: 0.0,
             pitch_px: 0.0,
             next_recover_ms: 0,
@@ -216,6 +233,9 @@ impl Agent {
                 } else {
                     self.threat = Tri::Neg;
                     self.threat_until = now_ms + 1200;
+                }
+                if s.hp > 0.5 {
+                    self.respawn_clicks = 0;
                 }
                 self.sensor = Some(s);
             }
@@ -404,20 +424,39 @@ impl Agent {
                 self.input.mouse_move(0, dy);
             }
         }
-        // 左键
-        let want_attack = d.dirs[Channel::Attack.index()] == Tri::Pos;
-        if want_attack != self.btn_left {
-            self.btn_left = want_attack;
-            self.input.button(Button::Left, want_attack);
+        // 左键：按下后至少按住 MIN_CLICK_MS，保证跨过一帧
+        if d.dirs[Channel::Attack.index()] == Tri::Pos {
+            if !self.btn_left {
+                self.btn_left = true;
+                self.input.button(Button::Left, true);
+            }
+            self.btn_left_until = now_ms + MIN_CLICK_MS;
+        } else if self.btn_left && now_ms >= self.btn_left_until {
+            self.btn_left = false;
+            self.input.button(Button::Left, false);
         }
         // 右键
-        let want_use = d.dirs[Channel::Use.index()] == Tri::Pos;
-        if want_use != self.btn_right {
-            self.btn_right = want_use;
-            self.input.button(Button::Right, want_use);
+        if d.dirs[Channel::Use.index()] == Tri::Pos {
+            if !self.btn_right {
+                self.btn_right = true;
+                self.input.button(Button::Right, true);
+            }
+            self.btn_right_until = now_ms + MIN_CLICK_MS;
+        } else if self.btn_right && now_ms >= self.btn_right_until {
+            self.btn_right = false;
+            self.input.button(Button::Right, false);
         }
         // 跳
-        self.set_key_space(d.dirs[Channel::Jump.index()] == Tri::Pos);
+        if d.dirs[Channel::Jump.index()] == Tri::Pos {
+            if !self.key_space {
+                self.key_space = true;
+                self.input.key(crate::act::vk::SPACE, true);
+            }
+            self.space_until = now_ms + MIN_JUMP_MS;
+        } else if self.key_space && now_ms >= self.space_until {
+            self.key_space = false;
+            self.input.key(crate::act::vk::SPACE, false);
+        }
         // 疾跑：前进时按住 Shift
         let running = self.cfg.sprint && d.dirs[Channel::Forward.index()] == Tri::Pos;
         if running != self.key_shift {
@@ -427,6 +466,13 @@ impl Agent {
         // 死亡：点重生
         if d.recover_click && now_ms >= self.next_recover_ms {
             self.next_recover_ms = now_ms + self.cfg.respawn_click_ms;
+            self.respawn_clicks = self.respawn_clicks.saturating_add(1);
+            if self.respawn_clicks > MAX_RESPAWN_CLICKS {
+                // 点了十几次都没活过来，大概率是画面被别的界面挡住（Esc 菜单 / 死亡界面没出）。
+                // 继续盲点只会误触，直接交还控制权。
+                self.arm(false);
+                return;
+            }
             self.input.click_center();
             // 点了重生不等于回满血，血量仍然是未知，等传感器报
             self.dead = false;
@@ -551,7 +597,7 @@ impl Agent {
             }
 
             // 定速：睡到下一拍，最后 1ms 自旋（Windows sleep 精度不够）
-            let elapsed = now.duration_since(start);
+            let elapsed = Instant::now().duration_since(start);
             let target = period.mul_f64(ticks as f64);
             if elapsed < target {
                 let remain = target - elapsed;
@@ -630,6 +676,30 @@ mod tests {
         assert!(!a.is_armed());
         let d = a.step(10, 5);
         assert_eq!(d.phase, Phase::Off);
+    }
+
+    #[test]
+    fn click_survives_multiple_ticks() {
+        // 回归：20 TPS 下 5ms 的按键脉冲会被整帧漏掉，表现是「AI 不打人」
+        let mut a = agent();
+        a.arm(true);
+        a.ingest(
+            LogEvent::Sensor(Sensor {
+                hp: 20.0,
+                food: 17,
+                x: 0.0,
+                y: 64.0,
+                z: 0.0,
+                hostiles: 2,
+            }),
+            0,
+        );
+        a.step(100, 5);
+        assert!(a.btn_left, "第一拍应该按下左键");
+        a.step(110, 5);
+        assert!(a.btn_left, "下一拍没投票也必须保持按住");
+        a.step(MIN_CLICK_MS + 120, 5);
+        assert!(!a.btn_left, "超过最小按住时长后应松开");
     }
 
     #[test]

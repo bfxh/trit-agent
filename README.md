@@ -51,8 +51,12 @@
 
 ```bash
 cargo build --release
-./target/release/trit-agent.exe probe      # 先确认能找到窗口、日志
-./target/release/trit-agent.exe run        # 接管
+
+# 先确认能找到窗口和日志
+./target/release/trit-agent.exe probe --profile "E:/MC/MC/profiles/烦人的村民"
+
+# 接管
+./target/release/trit-agent.exe run --profile "E:/MC/MC/profiles/烦人的村民"
 ```
 
 首次运行会生成 `trit-agent.toml`。
@@ -140,7 +144,7 @@ python scripts/build_datapacks.py --install "E:/MC/MC/profiles/烦人的村民"
 - **手眼要分开看**：AI 会抢你的鼠标和键盘。按 `F8` 关掉才是安全的对话姿势。
 
 **没做的验证**：本机没在真游戏里跑过端到端（这机器同时开游戏和编译会打架）。
-已验证的是：34 个测试（K3 真值表、平衡三进制往返、迟滞不抖、弃权优先、
+已验证的是：35 个测试（K3 真值表、平衡三进制往返、迟滞不抖、弃权优先、
 日志解析、端到端日志→决策）、release 构建 0 警告、高频实测数据、数据包 JSON 校验。
 第一次实机如果有问题，看 `trit-agent-run.log`（每 100ms 一行决策编码）。
 
