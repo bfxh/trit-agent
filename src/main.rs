@@ -215,6 +215,8 @@ fn high_freq_bench(hz: u32, dur: Duration) -> (u64, Duration) {
             y: 64.0,
             z: 0.0,
             hostiles: 2,
+            dist_tier: 3,
+            hazard_tier: 0,
         }),
         0,
     );
@@ -254,38 +256,66 @@ fn sim(flags: &Flags) {
     if let Some(m) = flags.get("mode") {
         cfg.mode = Mode::parse(m);
     }
-    println!("mode = {}", cfg.mode.as_str());
+    println!("mode = {}
+", cfg.mode.as_str());
     let mut a = Agent::new(cfg, Box::new(DryInput::new()));
     a.arm(true);
 
-    let sensor = |hp: f32, hostiles: i32| {
-        LogEvent::Sensor(Sensor {
-            hp,
-            food: 17,
-            x: 0.0,
-            y: 64.0,
-            z: 0.0,
-            hostiles,
-        })
-    };
+    // 场景表：(起, 止, 敌人数, 距离档, 爆炸源档, 说明)
+    // 距离档 32/16/10/6/3 对应「最近敌人 ≤N 格」，和 trit_bridge 的输出一致。
+    // 最后一位：坐标是否冻结（模拟顶着墙走不动）
+    let scenes: [(u64, u64, i32, i32, i32, bool, &str); 8] = [
+        (0, 2_000, 0, 0, 0, false, "无敌人"),
+        (2_000, 4_000, 1, 32, 0, false, "敌人 ≤32 格 → 追"),
+        (4_000, 5_000, 1, 10, 0, false, "敌人 ≤10 格 → 继续压上"),
+        (5_000, 7_000, 1, 6, 0, false, "敌人 ≤6 格 → 站住（原版没有这一档）"),
+        (7_000, 8_000, 1, 3, 0, false, "敌人 ≤3 格 → 退半步"),
+        (8_000, 9_000, 2, 10, 3, false, "敌人在 10 格 + 苦力怕贴脸 → 规避压过追击"),
+        (9_000, 10_400, 0, 0, 0, false, "敌人消失 → 停"),
+        (10_400, 13_000, 1, 32, 0, true, "被墙挡住：想追但走不动 → 低头砍墙"),
+    ];
 
-    println!("tick  phase     move strafe yaw pitch atk jump use  reason");
+    println!("tick  phase   move strafe yaw pitch atk jump use  说明");
+    let mut last: Option<[Tri; 7]> = None;
     let mut last_phase = Phase::Off;
-    let mut t: u64 = 0;
-    while t <= 9_000 {
-        match t {
-            0 => a.ingest(sensor(20.0, 0), t),
-            2_500 => a.ingest(sensor(20.0, 3), t),
-            5_000 => a.ingest(sensor(6.0, 3), t),
-            6_200 => a.ingest(LogEvent::Death("bfxh was slain by Zombie".into()), t),
-            6_600 => a.ingest(sensor(20.0, 0), t),
-            _ => {}
+    let mut mz = 0.0f32;
+    let mut mx = 0.0f32; // 模拟坐标：真的会随按键移动，否则卡住检测会误报
+    let mut next_sense = 0u64;
+
+    for t in (0..=13_000).step_by(100) {
+        let scene = scenes
+            .iter()
+            .find(|s| t >= s.0 && t < s.1)
+            .copied()
+            .unwrap_or(scenes[scenes.len() - 1]);
+
+        // 传感器每秒上报一次（数据包是 20 tick = 1 秒）
+        if t >= next_sense {
+            a.ingest(
+                LogEvent::Sensor(Sensor {
+                    hp: 20.0,
+                    food: 17,
+                    x: mx,
+                    y: 64.0,
+                    z: mz,
+                    hostiles: scene.2,
+                    dist_tier: scene.3,
+                    hazard_tier: scene.4,
+                }),
+                t,
+            );
+            next_sense = t + 1_000;
         }
+
         let d = a.step(t, 5);
-        if d.phase != last_phase || verbose {
+        let changed = match last {
+            None => true,
+            Some(p) => p != d.dirs || d.phase != last_phase,
+        };
+        if changed || verbose {
             let dirs = &d.dirs;
             println!(
-                "{:<5} {:<9} {:^4} {:^6} {:^3} {:^5} {:^3} {:^4} {:^3}  {}",
+                "{:<5} {:<7} {:^4} {:^6} {:^3} {:^5} {:^3} {:^4} {:^3}  {}",
                 t,
                 d.phase.name(),
                 dirs[Channel::Forward.index()].ch(),
@@ -295,14 +325,34 @@ fn sim(flags: &Flags) {
                 dirs[Channel::Attack.index()].ch(),
                 dirs[Channel::Jump.index()].ch(),
                 dirs[Channel::Use.index()].ch(),
-                d.reason.name()
+                format!("{}{}", scene.6, if a.world(t, t).stuck { "  [stuck]" } else { "" })
             );
+            last = Some(*dirs);
             last_phase = d.phase;
         }
-        t += 100;
+
+        // 模拟位移：前进约 4.3 格/秒，横移约 3 格/秒。
+        // 两个方向都要模拟，否则「只按横移不产生前后位移」会被卡住检测误判成
+        // 撞牆，然后低头砍地 —— 那是真的会发生的，但演示例子里不该出现。
+        if !scene.5 {
+            match d.dirs[Channel::Forward.index()] {
+                Tri::Pos => mx += 0.43,
+                Tri::Neg => mx -= 0.43,
+                Tri::Zero => {}
+            }
+            match d.dirs[Channel::Strafe.index()] {
+                Tri::Pos => mz += 0.30,
+                Tri::Neg => mz -= 0.30,
+                Tri::Zero => {}
+            }
+        }
     }
-    println!("\n阶段轨迹：idle → engage（3 个敌人）→ retreat（6 血）→ recover（死亡）→ idle");
-    println!("注意 5000ms 那行：血低 + 有威胁 → 强制 Forward=-1（后退），这是阶段机覆盖裁决器的结果。");
+
+    println!();
+    println!("move 列的三段：+) 追  o) 站住  -) 后退");
+    println!("中间那一段是这次从 mob mod 移植过来的 —— 原版 Goal 只有「靠近」和「开火」，");
+    println!("没有「位置刚好」这一档，所以 NPC 会一路挤到你脸上。");
+    println!("x 估算位移 {} 格（13 秒）", (mx * 10.0).round() / 10.0);
 }
 
 // ---------------------------------------------------------------- probe

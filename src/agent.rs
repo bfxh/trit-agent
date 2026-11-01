@@ -16,6 +16,10 @@ const MIN_CLICK_MS: u64 = 70;
 const MIN_JUMP_MS: u64 = 90;
 /// 连续点重生超过这么多次就认为点不到，主动交还控制权。
 const MAX_RESPAWN_CLICKS: u32 = 12;
+/// 卡住判定的滑动窗口。
+const STUCK_WINDOW_MS: u64 = 900;
+/// 窗口内水平位移低于这个值就算卡住（格）。
+const STUCK_MIN_TRAVEL: f32 = 0.4;
 
 pub struct RunStats {
     pub ticks: u64,
@@ -41,6 +45,16 @@ pub struct Agent {
     pub threat_until: u64,
     pub contact_until: u64,
     pub dead: bool,
+    /// 最近敌对生物距离档（0 = 无）
+    dist_tier: i32,
+    /// 最近爆炸源距离档（0 = 无）
+    hazard_tier: i32,
+    /* 卡住检测：累计路程窗口 */
+    pos_last: Option<(f32, f32, f32)>,
+    pos_win_start: u64,
+    /// 窗口内累计走过的路程（不是首尾直线距离）
+    pos_travel: f32,
+    stuck: bool,
 
     /* 输出状态去重 */
     key_w: bool,
@@ -96,6 +110,12 @@ impl Agent {
             threat_until: 0,
             contact_until: 0,
             dead: false,
+            dist_tier: 0,
+            hazard_tier: 0,
+            pos_last: None,
+            pos_win_start: 0,
+            pos_travel: 0.0,
+            stuck: false,
             key_w: false,
             key_s: false,
             key_a: false,
@@ -220,13 +240,57 @@ impl Agent {
         }
     }
 
+    /// 卡住检测：按着前后键，但 0.9 秒内没能离开原处 0.4 格。
+    ///
+    /// 这是 `improvedmobs/BlockBreakGoal` 的触发条件在外部驱动侧的等价物：
+    /// 那个 Goal 靠 `navigation.isStuck()`，我们只能靠坐标差分。
+    ///
+    /// 两个细节都是踩出来的：
+    /// 1. **只在前后键按下时判定**。原先把横移键也算进去，结果角色原地左右
+    ///    走位（Forward=o、Strafe 来回）时净位移接近 0，被误判成撞墙，然后
+    ///    低头砍地。「卡住」的语义本来就是「想前进但前进不了」，横移不算。
+    /// 2. 数据包 1 秒才报一次坐标，所以这里本质是「1 秒净位移」。想更准就得
+    ///    提高上报频率，代价是聊天框刷屏 —— 现在这样够用。
+    fn track_motion(&mut self, x: f32, y: f32, z: f32, now_ms: u64) {
+        // 用 pos_last 而不是 pos_win_start==0 判断首帧：
+        // now_ms 真的可能是 0，用 0 当哨兵会把第二个窗口整个吞掉。
+        let first = self.pos_last.is_none();
+        if let Some(prev) = self.pos_last {
+            let dx = x - prev.0;
+            let dz = z - prev.2;
+            let step = (dx * dx + dz * dz).sqrt();
+            if step.is_finite() {
+                self.pos_travel += step;
+            }
+        }
+        self.pos_last = Some((x, y, z));
+        let _ = y;
+
+        if first {
+            self.pos_win_start = now_ms;
+            return;
+        }
+        if now_ms.saturating_sub(self.pos_win_start) < STUCK_WINDOW_MS {
+            return;
+        }
+        // 只认前后键：横移被挡住不算卡住
+        let pushing = self.key_w || self.key_s;
+        self.stuck = pushing && !self.dead && self.pos_travel < STUCK_MIN_TRAVEL;
+        self.pos_travel = 0.0;
+        self.pos_win_start = now_ms;
+    }
+
     /// 处理一条游戏内事件。
     pub fn ingest(&mut self, ev: LogEvent, now_ms: u64) {
         match ev {
             LogEvent::Sensor(s) => {
                 self.hp = Some(s.hp);
                 self.dead = s.hp <= 0.0;
-                if s.hostiles > 0 {
+                self.dist_tier = s.dist_tier;
+                self.hazard_tier = s.hazard_tier;
+                // 敌人数和距离档任一非零都算有威胁：数据包的计数有半径上限，
+                // 而距离档是独立的几档判定，两边取并集才不会漏。
+                if s.hostiles > 0 || s.dist_tier > 0 {
                     self.threat = Tri::Pos;
                     self.threat_until = now_ms + 2500;
                     self.contact_until = now_ms + 4000;
@@ -237,6 +301,7 @@ impl Agent {
                 if s.hp > 0.5 {
                     self.respawn_clicks = 0;
                 }
+                self.track_motion(s.x, s.y, s.z, now_ms);
                 self.sensor = Some(s);
             }
             LogEvent::HealthProbe(h) => {
@@ -317,23 +382,66 @@ impl Agent {
                 self.contact_until = 0;
                 "calm".to_string()
             }
+            "tac" => {
+                let t = &mut self.cfg.tactics;
+                match arg.as_str() {
+                    "" => {}
+                    "on" | "1" => *t = crate::config::Tactics::default(),
+                    "off" | "0" => {
+                        *t = crate::config::Tactics {
+                            range: false,
+                            hazard: false,
+                            guard: false,
+                            breach: false,
+                        }
+                    }
+                    "guard" => t.guard = !t.guard,
+                    "range" => t.range = !t.range,
+                    "hazard" => t.hazard = !t.hazard,
+                    "breach" => t.breach = !t.breach,
+                    _ => {}
+                }
+                self.behaviors = Behaviors::new(&self.cfg);
+                self.tactics_line()
+            }
             "status" => format!(
-                "{} phase={} hp={}",
+                "{} phase={} hp={} {}",
                 if self.armed { "armed" } else { "off" },
                 self.machine.phase.name(),
-                self.hp.map(|h| format!("{h:.1}")).unwrap_or("?".into())
+                self.hp.map(|h| format!("{h:.1}")).unwrap_or("?".into()),
+                self.tactics_line()
             ),
-            _ => "? !ai !mode !attack !move !look !jump !use !threat !calm !status".to_string(),
+            _ => "? !ai !mode !tac !attack !move !look !jump !use !threat !calm !status".to_string(),
         };
         reply
     }
 
+    /// 战术开关的一行摘要，给 `!status` 和 `!tac` 用。
+    fn tactics_line(&self) -> String {
+        let t = &self.cfg.tactics;
+        let on = |b: bool| if b { "+" } else { "-" };
+        format!(
+            "tac={}{}{}{}",
+            on(t.range),
+            on(t.hazard),
+            on(t.guard),
+            on(t.breach)
+        )
+    }
+
     pub fn world(&self, tick: u64, now_ms: u64) -> WorldView {
+        let dist = crate::npc::tier_to_dist(self.dist_tier);
+        // 数据包只报「最近爆炸源」一档，统一按苦力怕的 10 格判据处理：
+        // TNT 引信 4 秒、爆炸半径 7 格，10 格起跑更保守。
+        let hazard = crate::npc::hazard_band(crate::npc::tier_to_dist(self.hazard_tier), None);
         WorldView {
             hp: self.hp.map(|h| (h / 20.0).clamp(0.0, 1.0)),
             threat: self.threat,
             contact: self.contact_until > now_ms,
-            stuck: false,
+            dist,
+            hazard,
+            stuck: self.stuck,
+            pos: self.pos_last,
             dead: self.dead,
             human_takeover: !self.armed,
             tick,
@@ -630,6 +738,25 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 造一条传感器事件：hp / 敌人数 / 最近敌人距离档。
+    fn sens(hp: f32, hostiles: i32, d: i32) -> LogEvent {
+        sens_at(hp, hostiles, d, 0.0, 0.0, 0)
+    }
+
+    /// 同上，但指定坐标和爆炸源档。
+    fn sens_at(hp: f32, hostiles: i32, d: i32, x: f32, z: f32, c: i32) -> LogEvent {
+        LogEvent::Sensor(Sensor {
+            hp,
+            food: 17,
+            x,
+            y: 64.0,
+            z,
+            hostiles,
+            dist_tier: if hostiles > 0 { d } else { 0 },
+            hazard_tier: c,
+        })
+    }
     use crate::act::dry::DryInput;
 
     fn agent() -> Agent {
@@ -643,14 +770,7 @@ mod tests {
         let mut a = agent();
         a.arm(true);
         a.ingest(
-            LogEvent::Sensor(Sensor {
-                hp: 20.0,
-                food: 17,
-                x: 0.0,
-                y: 64.0,
-                z: 0.0,
-                hostiles: 3,
-            }),
+            sens(20.0, 3, 3),
             0,
         );
         let d = a.step(100, 5);
@@ -684,14 +804,7 @@ mod tests {
         let mut a = agent();
         a.arm(true);
         a.ingest(
-            LogEvent::Sensor(Sensor {
-                hp: 20.0,
-                food: 17,
-                x: 0.0,
-                y: 64.0,
-                z: 0.0,
-                hostiles: 2,
-            }),
+            sens(20.0, 2, 3),
             0,
         );
         a.step(100, 5);
@@ -703,18 +816,39 @@ mod tests {
     }
 
     #[test]
+    fn wall_pushing_triggers_breach() {
+        // 想追但坐标不动：1 秒后应判定卡住，然后低头砍墙。
+        let mut a = agent();
+        a.arm(true);
+        a.ingest(sens_at(20.0, 1, 32, 0.0, 0.0, 0), 0);
+        a.step(100, 5); // 这一拍按下 W，key_w = true
+        assert!(a.key_w, "追击时应按住前进");
+        a.ingest(sens_at(20.0, 1, 32, 0.0, 0.0, 0), 1_000);
+        assert!(a.world(2, 1_000).stuck, "1 秒原地踏步应判定卡住");
+        let d = a.step(1_100, 5);
+        assert_eq!(d.dirs[Channel::Pitch.index()], Tri::Pos, "卡住应低头");
+        assert_eq!(d.dirs[Channel::Attack.index()], Tri::Pos, "卡住应砍方块");
+    }
+
+    #[test]
+    fn sidestepping_is_not_stuck() {
+        // 原地横移不是卡住：净位移接近 0，但按的不是前后键
+        let mut a = agent();
+        a.arm(true);
+        // 敌人 4.5 格 → Forward 站住、Strafe 来回
+        a.ingest(sens_at(20.0, 1, 6, 0.0, 0.0, 0), 0);
+        a.step(100, 5);
+        assert!(!a.key_w, "中距离应站住不前进");
+        a.ingest(sens_at(20.0, 1, 6, 0.0, 0.0, 0), 1_000);
+        assert!(!a.world(2, 1_000).stuck, "没按前后键就不该判卡住");
+    }
+
+    #[test]
     fn panic_releases_everything() {
         let mut a = agent();
         a.arm(true);
         a.ingest(
-            LogEvent::Sensor(Sensor {
-                hp: 20.0,
-                food: 17,
-                x: 0.0,
-                y: 64.0,
-                z: 0.0,
-                hostiles: 1,
-            }),
+            sens(20.0, 1, 3),
             0,
         );
         a.step(50, 5);

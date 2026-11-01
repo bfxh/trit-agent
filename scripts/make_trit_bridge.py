@@ -22,6 +22,13 @@ VANILLA_HOSTILES = [
     "hoglin", "zoglin", "ghast", "shulker", "silverfish", "endermite",
 ]
 
+# 会爆炸的实体。苦力怕是 10 格起跑（它会追你），TNT 是 3 格（不会追）。
+EXPLOSIVES = ["creeper", "tnt", "end_crystal", "fireball", "small_fireball", "wither_skull"]
+
+# 距离档。数据包算精确距离要遍历实体，这里只做几次半径判定，
+# 从远到近依次覆盖，最后留下的就是最近那一档。外部按档位下界使用。
+DIST_TIERS = [32, 16, 10, 6, 3]
+
 
 def write(rel: str, text: str) -> None:
     p = BRIDGE / rel
@@ -58,14 +65,27 @@ def sense_function() -> str:
     lines = [
         "# 传感器：每 20 tick 由 pulse 调用一次，读一帧状态写进聊天",
         "scoreboard players set hst trit_bridge 0",
+        "# 距离档：从远到近依次覆盖，最终留下最近那一档（0 = 视野内没有）",
+        "scoreboard players set dst trit_bridge 0",
+        "scoreboard players set xst trit_bridge 0",
     ]
     for score, nbt, scale in parts:
         lines.append(
             f"execute store result score {score} trit_bridge run data get entity @s {nbt} {scale}"
         )
     lines.append(
-        "execute as @e[type=#trit_bridge:hostiles,limit=24,distance=..16] run scoreboard players add hst trit_bridge 1"
+        "execute as @e[type=#trit_bridge:hostiles,limit=32,distance=..32] run scoreboard players add hst trit_bridge 1"
     )
+    for t in DIST_TIERS:
+        lines.append(
+            f"execute if entity @e[type=#trit_bridge:hostiles,limit=1,distance=..{t}] "
+            f"run scoreboard players set dst trit_bridge {t}"
+        )
+    for t in DIST_TIERS:
+        lines.append(
+            f"execute if entity @e[type=#trit_bridge:explosives,limit=1,distance=..{t}] "
+            f"run scoreboard players set xst trit_bridge {t}"
+        )
     tell = [
         {"text": "<TRIT hp="},
         {"score": {"name": "hp", "objective": "trit_bridge"}},
@@ -79,6 +99,10 @@ def sense_function() -> str:
         {"score": {"name": "pz", "objective": "trit_bridge"}},
         {"text": " h="},
         {"score": {"name": "hst", "objective": "trit_bridge"}},
+        {"text": " d="},
+        {"score": {"name": "dst", "objective": "trit_bridge"}},
+        {"text": " c="},
+        {"score": {"name": "xst", "objective": "trit_bridge"}},
         {"text": ">"},
     ]
     lines.append("tellraw @s " + json.dumps(tell, ensure_ascii=False, separators=(",", ":")))
@@ -128,9 +152,14 @@ def main() -> None:
 
     write("data/trit_bridge/tags/entity_types/hostiles.json",
           json.dumps(hostiles_tag(), ensure_ascii=False, indent=2) + "\n")
+    write("data/trit_bridge/tags/entity_types/explosives.json",
+          json.dumps({"replace": False,
+                      "values": [f"minecraft:{e}" for e in EXPLOSIVES]},
+                     ensure_ascii=False, indent=2) + "\n")
 
     n = len(hostiles_tag()["values"])
-    print(f"trit_bridge 生成完毕，敌对实体 {n} 个")
+    print(f"trit_bridge 生成完毕，敌对实体 {n} 个，爆炸源 {len(EXPLOSIVES)} 个")
+    print(f"距离档：{DIST_TIERS}（数据包只报档位下界，精确距离由 Rust 侧按档使用）")
     for p in sorted(BRIDGE.rglob("*")):
         if p.is_file():
             print("  ", p.relative_to(ROOT))

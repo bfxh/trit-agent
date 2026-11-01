@@ -54,6 +54,34 @@ impl Default for Channels {
     }
 }
 
+/// 战术开关。四条全部移植自整合包里 mob mod 的 Goal，能单独关。
+///
+/// 关掉任一条 = 恢复「没有这一档战术」的原始行为，方便定位是谁把事情搞砸。
+#[derive(Clone, Copy, Debug)]
+pub struct Tactics {
+    /// 交战距离带：太远追、刚好站住、贴脸退半步。
+    /// 原版对应 `MeleeAttackGoal`（3 格）+ `EARangedBowAttackGoal`（7 格）。
+    pub range: bool,
+    /// 爆炸物规避：苦力怕 10 格、TNT 3 格。对应 `AvoidCreeperGoal`/`AvoidTNTGoal`。
+    pub hazard: bool,
+    /// 受伤且近身时按右键格挡。对应 `ShieldingGoal` / `RaiseShieldGoal`。
+    /// 注意：手上拿的是食物时右键会触发进食，不想要就关掉这条。
+    pub guard: bool,
+    /// 卡住 1.2 秒就低头砍墙。对应 `BlockBreakGoal` / `DiggingGoal`。
+    pub breach: bool,
+}
+
+impl Default for Tactics {
+    fn default() -> Self {
+        Tactics {
+            range: true,
+            hazard: true,
+            guard: true,
+            breach: true,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     /// 状态机内部节拍。默认 200 Hz（游戏是 20 TPS，这里是它的 10 倍，
@@ -71,6 +99,7 @@ pub struct Config {
 
     pub mode: Mode,
     pub channels: Channels,
+    pub tactics: Tactics,
 
     pub attack_interval_ms: u64,
     pub jump_crit_every: u32,
@@ -107,6 +136,7 @@ impl Default for Config {
             toggle_move_vk: 0x76,   // F7
             mode: Mode::Hold,
             channels: Channels::default(),
+            tactics: Tactics::default(),
             attack_interval_ms: 620,
             jump_crit_every: 2,
             strafe_flip_ms: 900,
@@ -204,6 +234,18 @@ impl Config {
         if let Some(v) = g("ch_jump").and_then(|v| parse_bool(&v)) {
             c.channels.jump = v;
         }
+        if let Some(v) = g("tac_range").and_then(|v| parse_bool(&v)) {
+            c.tactics.range = v;
+        }
+        if let Some(v) = g("tac_hazard").and_then(|v| parse_bool(&v)) {
+            c.tactics.hazard = v;
+        }
+        if let Some(v) = g("tac_guard").and_then(|v| parse_bool(&v)) {
+            c.tactics.guard = v;
+        }
+        if let Some(v) = g("tac_breach").and_then(|v| parse_bool(&v)) {
+            c.tactics.breach = v;
+        }
         if let Some(v) = g("ch_use").and_then(|v| parse_bool(&v)) {
             c.channels.use_item = v;
         }
@@ -275,6 +317,16 @@ ch_look = true
 ch_attack = true
 ch_jump = true
 ch_use = true
+
+# 战术开关（全部移植自整合包里 mob mod 的 AI Goal，可单独关）
+# 交战距离带：太远追 / 3~7 格站住 / 贴脸退半步
+tac_range = true
+# 爆炸物规避：苦力怕 10 格、TNT 3 格
+tac_hazard = true
+# 受伤且近身时按右键格挡（手上要是盾；拿食物会变成进食）
+tac_guard = true
+# 卡住 1.2 秒就低头砍墙
+tac_breach = true
 
 # 战斗节奏
 attack_interval_ms = 620

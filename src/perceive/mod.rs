@@ -17,6 +17,11 @@ pub struct Sensor {
     pub z: f32,
     /// 16 格内敌对实体数（数据包上限 24）
     pub hostiles: i32,
+    /// 最近敌对生物的距离档（0 = 没有；1..33 = 该档下界格数）。
+    /// 数据包算精确距离要遍历实体，这里只做几档半径判定，够用且便宜。
+    pub dist_tier: i32,
+    /// 最近爆炸源（苦力怕 / TNT / 床）的距离档，0 = 没有。
+    pub hazard_tier: i32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -116,13 +121,16 @@ pub fn classify(line: &str) -> Option<LogEvent> {
 }
 
 fn parse_sensor(body: &str) -> Option<Sensor> {
-    // 形如：hp=200 food=17 x=123 y=-60 z=88 h=2
+    // 形如：hp=200 food=17 x=123 y=-60 z=88 h=2 d=6 c=0
+    // d / c 是后加的，老格式没有，缺失时按 0（= 没有该目标）处理。
     let mut hp = None;
     let mut food = 17;
     let mut x = 0.0;
     let mut y = 0.0;
     let mut z = 0.0;
     let mut h = 0;
+    let mut d = 0;
+    let mut c = 0;
     for part in body.split_whitespace() {
         let (k, v) = part.split_once('=')?;
         match k {
@@ -132,6 +140,8 @@ fn parse_sensor(body: &str) -> Option<Sensor> {
             "y" => y = v.parse::<f32>().map(|v| v / 10.0).unwrap_or(0.0),
             "z" => z = v.parse::<f32>().map(|v| v / 10.0).unwrap_or(0.0),
             "h" => h = v.parse().unwrap_or(0),
+            "d" => d = v.parse().unwrap_or(0),
+            "c" => c = v.parse().unwrap_or(0),
             _ => {}
         }
     }
@@ -142,6 +152,8 @@ fn parse_sensor(body: &str) -> Option<Sensor> {
         y,
         z,
         hostiles: h,
+        dist_tier: d,
+        hazard_tier: c,
     })
 }
 

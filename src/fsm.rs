@@ -72,11 +72,16 @@ impl Channel {
         }
     }
     /// (进入阈值, 迟滞量)。视角通道阈值高一点，避免视线抖。
+    ///
+    /// 注意：迟滞会把「需要翻过去的总分」抬高到 `阈值 + 迟滞`（当上一拍已是
+    /// 已知值）。如果某个通道**每拍都有固定权重的票**，而该权重小于这个和，
+    /// 这个通道就会永远停在上一拍的值上 —— 表现为「左右换边失效」「视角不转」。
+    /// 所以每拍都有人投票的通道（Forward/Strafe/Yaw），迟滞不能比票权重大。
     pub fn policy(self) -> (i32, i32) {
         match self {
             Channel::Forward => (1, 1),
-            Channel::Strafe => (1, 2),
-            Channel::Yaw => (2, 2),
+            Channel::Strafe => (1, 1),
+            Channel::Yaw => (2, 1),
             Channel::Pitch => (2, 2),
             Channel::Attack => (1, 1),
             Channel::Jump => (1, 2),
@@ -118,8 +123,17 @@ pub struct WorldView {
     pub threat: Tri,
     /// 最近是否交过手（带衰减）
     pub contact: bool,
+    /// 最近敌对生物的距离（格）。None = 没感知到距离，不是“没有敌人”。
+    ///
+    /// 这个字段是「战术」和「莽」的分界线：不知道距离就只能贴着脸打，
+    /// 知道距离才能决定该进、该站、还是该退。
+    pub dist: Option<f32>,
+    /// 爆炸危险：Pos 必须躲，Neg 明确安全，Zero 边缘/未知。
+    pub hazard: Tri,
     /// 是否卡住（位移长时间为 0）
     pub stuck: bool,
+    /// 当前坐标（x, y, z）。None = 还没读到过。
+    pub pos: Option<(f32, f32, f32)>,
     pub dead: bool,
     /// 人类按下 F8 关掉 AI
     pub human_takeover: bool,

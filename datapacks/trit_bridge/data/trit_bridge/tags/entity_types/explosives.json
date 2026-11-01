@@ -1,0 +1,11 @@
+{
+  "replace": false,
+  "values": [
+    "minecraft:creeper",
+    "minecraft:tnt",
+    "minecraft:end_crystal",
+    "minecraft:fireball",
+    "minecraft:small_fireball",
+    "minecraft:wither_skull"
+  ]
+}
