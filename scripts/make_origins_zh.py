@@ -111,34 +111,44 @@ def build_pack(zh: dict) -> pathlib.Path:
 
 
 def inject(jar: pathlib.Path, zh: dict) -> None:
-    """把 zh_cn.json 追加进模组 jar。
+    """把 zh_cn.json 写进模组 jar（已有则覆盖）。
 
-    jar 就是 zip，用 append 模式加一个条目即可；不重打包整个 jar，
-    因为重打包会丢掉条目的时间戳/顺序，某些加载器对签名 jar 会翻脸。
+    jar 就是 zip。**不能用 append 模式**——同名条目会变成两条，虽然后
+    一条生效，但 jar 会一点点肿起来，而且 `javafml` 校验时可能抱怨。
+    所以整包重写一遍：其余条目原样搬运**并复用原 ZipInfo**（时间戳、
+    压缩方式、顺序都不变），只把 zh_cn.json 换掉。
     """
     payload = json.dumps(zh, ensure_ascii=False, indent=2).encode("utf-8")
     bak = jar.with_suffix(f".jar.bak-{time.strftime('%Y%m%d-%H%M%S')}")
-    before = len(zipfile.ZipFile(jar).namelist())
+    tmp = jar.with_suffix(".jar.tmp")
     shutil.copy2(jar, bak)
+
+    before = zipfile.ZipFile(bak).namelist()
     try:
-        with zipfile.ZipFile(jar, "a", zipfile.ZIP_DEFLATED) as z:
-            # 同名条目先剔除，否则会留下两条（MC 读最后一条，但不干净）
-            names = z.namelist()
-            if LANG_REL in names:
-                raise SystemExit(f"{jar.name} 里已经有 {LANG_REL}，先回滚 .bak 再跑")
-            z.writestr(LANG_REL, payload)
-        with zipfile.ZipFile(jar) as z:
+        with zipfile.ZipFile(bak) as src, \
+                zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as dst:
+            for info in src.infolist():
+                if info.filename == LANG_REL:
+                    continue          # 旧的译文条目直接丢掉，下面写新的
+                dst.writestr(info, src.read(info.filename))
+            dst.writestr(LANG_REL, payload)
+        # 自检：条目数只应因为「本来没有」而 +1；mods.toml 必须在；译文能读回
+        with zipfile.ZipFile(tmp) as z:
             after = z.namelist()
             got = load_json_bytes(z.read(LANG_REL))
-            if len(after) != before + 1 or got != zh:
-                raise SystemExit("注入后自检失败，用 .bak 回滚")
+            expect = len(before) + (0 if LANG_REL in before else 1)
+            if len(after) != expect or got != zh:
+                raise SystemExit("注入后自检失败，未改动原 jar")
             if "META-INF/mods.toml" not in after:
-                raise SystemExit("注入后 mods.toml 不见了，用 .bak 回滚")
+                raise SystemExit("注入后 mods.toml 不见了，未改动原 jar")
+            if z.testzip() is not None:
+                raise SystemExit("注入后 zip 有损坏条目，未改动原 jar")
+        tmp.replace(jar)
     except Exception:
-        shutil.copy2(bak, jar)
-        print(f"  注入失败，已回滚（备份 {bak.name}）")
+        tmp.unlink(missing_ok=True)
+        print("  注入失败，原 jar 未改动")
         raise
-    print(f"  已注入 {jar.name}")
+    print(f"  已注入 {jar.name}（条目 {len(before)} → {len(zipfile.ZipFile(jar).namelist())}）")
     print(f"     备份 {bak.name}（想还原就把它改回 .jar）")
 
 

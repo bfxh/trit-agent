@@ -4,3 +4,6 @@
 /trit-agent-run.log
 *.log
 /.workbuddy/
+
+# 翻译过程中的临时导出（可重新生成，不入库）
+/.work/

@@ -435,6 +435,11 @@ HMCL 的窗口标题 `Hello Minecraft! Launcher` 同样包含 minecraft，
 
 热键是全局的 —— 即使焦点在浏览器上也能按 `F8` 把 AI 停掉。
 
+**按 `F8` 没反应，九成是进程没在跑。** 热键是进程里注册的全局钩子，窗口一关就没了。
+所以现在「启动 AI」双击一次就够了，**先开它、后开游戏也行**：找不到游戏窗口时它会
+原地等（每 10 秒打印一次在等什么），不会像以前那样打印一行就 `exit(2)` 让黑窗口一闪而过
+—— 那正是「我按了 `F8` 什么都没发生」的来源。
+
 ### 关掉它的时候到底发生了什么
 
 按 `F8` 是一串动作，不是一个布尔值：
@@ -482,16 +487,30 @@ AI 开着的时候直接在聊天框里打字。
 CFPA 汉化包覆盖了 `moborigins` / `origins-classes`，**没有覆盖 `origins-plus-plus`**
 （它的 2490 条词条在 CFPA 里一条都没有），所以起源选择界面原本全是英文。
 
-译文源文件在 `datapacks/origins_zh/assets/origins-plus-plus/lang/zh_cn.json`：
+**现已 2490 / 2490 全译完**（起源 241、能力 2100、容器 10、杂项 139）：
+选择界面里点进任何一个起源，右边那串技能名和说明也是中文了。
+
+分片写在 `datapacks/origins_zh/_parts/*.json`，合并后落到
+`datapacks/origins_zh/assets/origins-plus-plus/lang/zh_cn.json`：
 
 ```bash
-# 校验 + 出资源包 + 塞进模组 jar（推荐，免手动启用）
+# 合并分片（逐条核对 key 是否真实存在）+ 校验 + 出资源包 + 塞进模组 jar
+python scripts/merge_zh.py  --mods "E:/MC/MC/profiles/烦人的村民/mods"
 python scripts/make_origins_zh.py --mods "E:/MC/MC/profiles/烦人的村民/mods" --inject
 ```
 
+**为什么分成片 + 按序号回填**：两千多条如果每条都手写
+`power.origins-plus-plus.xxx/yyy.name` 这种 key，光 key 就两万多字符，
+错一个字母就静默失效。所以先把英文导出成 `序号<TAB>key<TAB>英文` 的 TSV，
+翻译时只写 `序号<TAB>中文`，由 `scripts/apply_zh.py` 回填——序号对不上直接报错，
+不可能错位。TSV 是逐行存的，原文里的换行用 `⏎` 占位，回填时还原成 `\n`
+（技能说明里那些换行是 tooltip 排版的一部分）。
+
 **为什么塞进 jar**：模组自带的资源是无条件加载的，而资源包要在「选项 → 资源包」
 里手动启用，且游戏退出时用内存里的列表覆盖 `options.txt` —— 运行期改文件无效。
-塞进 jar 只需要重启一次，没有任何手动步骤。模组更新会覆盖掉，重跑上面那条命令即可。
+塞进 jar 只需要重启一次，没有任何手动步骤。模组更新会覆盖掉，重跑上面两条命令即可。
+已有译文时注入是**整包重写**（其余条目复用原 ZipInfo 搬运），不是 append，
+否则同名条目会变成两条、jar 慢慢变肿。
 
 脚本会先校验每个 key 在模组 `en_us.json` 里真实存在。这一步不是形式主义：
 key 写错一个字母，游戏**照常显示英文，不报错、不写日志**，和这个仓库里踩过的

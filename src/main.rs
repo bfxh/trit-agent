@@ -832,12 +832,37 @@ fn run(flags: &Flags) {
         begin_high_res_timer();
         trit_agent::act::win32::install_panic_handler();
 
-        let input = match Win32Input::attach(&cfg.window_title) {
-            Some(i) => i,
-            None => {
-                eprintln!("找不到标题含 \"{}\" 的窗口。先启动游戏，或用 --window 指定关键字。", cfg.window_title);
-                end_high_res_timer();
-                std::process::exit(2);
+        // 等窗口，别一找不到就退出。
+        //
+        // 双击 bat 的那一下游戏通常还在加载（整合包要几十秒），旧代码此时打印
+        // 一行就 exit(2)，黑窗口一闪而过 —— 玩家看到的就是「F8 按了没反应」，
+        // 因为进程早没了。现在改成原地等，每 10 秒说一次在等什么。
+        let input = {
+            let deadline = (seconds > 0).then(|| Instant::now() + Duration::from_secs(seconds));
+            let mut note = Instant::now();
+            let mut tries: u32 = 0;
+            loop {
+                if let Some(i) = Win32Input::attach(&cfg.window_title) {
+                    break i;
+                }
+                tries += 1;
+                if note.elapsed() >= Duration::from_secs(10) || tries == 1 {
+                    note = Instant::now();
+                    println!(
+                        "还在等游戏窗口（标题含 \"{}\"）……已等 {} 秒。\
+                         先把游戏开起来并进入世界，这个窗口不要关。",
+                        cfg.window_title,
+                        (tries as f32 * 0.5) as u32
+                    );
+                }
+                if let Some(d) = deadline {
+                    if Instant::now() >= d {
+                        eprintln!("等了 {} 秒仍找不到窗口，退出。", seconds);
+                        end_high_res_timer();
+                        std::process::exit(2);
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(500));
             }
         };
         println!("已挂上窗口: {}", input.title());

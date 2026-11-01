@@ -31,7 +31,7 @@ DATA_PACK_FORMAT = 9
 # 资源包 pack_format：1.18.2 是 8
 RESOURCE_PACK_FORMAT = 8
 
-RESOURCE_PACKS = {"summoner_lang"}
+RESOURCE_PACKS = {"summoner_lang", "origins_zh"}
 
 
 def validate_json(zf: zipfile.ZipFile) -> None:
