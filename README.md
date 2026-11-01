@@ -477,6 +477,26 @@ AI 开着的时候直接在聊天框里打字。
 
 回显、状态行、演示表格、数据包聊天消息、起源与技能名，**全部中文**。
 
+#### 起源++ 的汉化（模组内容，不是我们的代码）
+
+CFPA 汉化包覆盖了 `moborigins` / `origins-classes`，**没有覆盖 `origins-plus-plus`**
+（它的 2490 条词条在 CFPA 里一条都没有），所以起源选择界面原本全是英文。
+
+译文源文件在 `datapacks/origins_zh/assets/origins-plus-plus/lang/zh_cn.json`：
+
+```bash
+# 校验 + 出资源包 + 塞进模组 jar（推荐，免手动启用）
+python scripts/make_origins_zh.py --mods "E:/MC/MC/profiles/烦人的村民/mods" --inject
+```
+
+**为什么塞进 jar**：模组自带的资源是无条件加载的，而资源包要在「选项 → 资源包」
+里手动启用，且游戏退出时用内存里的列表覆盖 `options.txt` —— 运行期改文件无效。
+塞进 jar 只需要重启一次，没有任何手动步骤。模组更新会覆盖掉，重跑上面那条命令即可。
+
+脚本会先校验每个 key 在模组 `en_us.json` 里真实存在。这一步不是形式主义：
+key 写错一个字母，游戏**照常显示英文，不报错、不写日志**，和这个仓库里踩过的
+「墙方位镜像」「`minecraft:minecraft:` 前缀」是同一类静默失败。
+
 ```
 !status   →  运行中 阶段=待命 血量=18.5 战术[保持距离开 规避爆炸开 举盾开 破墙开] …
 !gather   →  采集已开启（gather=等安全 目标=木头 why=攒安全 采=0 断=0(可以干) 墙=-）
