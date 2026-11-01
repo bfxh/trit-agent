@@ -588,8 +588,37 @@ python scripts/build_datapacks.py --install "E:/MC/MC/profiles/烦人的村民"
 /datapack enable "file/squad.zip"
 ```
 
-`level.dat` 可以用脚本解析出来核（`Data.DataPacks.Enabled`），
-看到里面没有 `file/xxx.zip` 就是没启用，吹什么都白搭。
+`level.dat` 用脚本查，别靠猜：
+
+```bash
+# 只读，游戏开着也能跑
+python scripts/save_packs.py status "E:/MC/MC/profiles/烦人的村民"
+
+# 退出游戏后，一次把所有存档的 file/ 包全开
+python scripts/save_packs.py enable "E:/MC/MC/profiles/烦人的村民" --all
+```
+
+输出是这样的，`[关]` 就是"文件在、但游戏不会加载它"：
+
+```
+=== 新的世界
+    [关] squad.zip
+    [关] summoner_origin.zip
+    [关] trit_bridge.zip
+```
+
+`enable` 只改 `Data.DataPacks.Enabled` 那一段字节，其余字节一个都不动
+（不做整树重序列化 —— NBT 里 byte/int/long 在脚本侧都是数字，重写会把
+`hardcore`、`Difficulty` 这种 byte 字段写成 int，存档就打不开了），
+写之前自动备份 `level.dat.bak-<时间>`，写完再解析一遍自检。
+
+**先退出游戏**：游戏把 level.dat 映射在内存里，退出时整个覆盖写回，
+运行期改磁盘等于白改。脚本检测到 `javaw.exe` 会直接拒绝。
+
+**1.5 新建的世界里根本没有这些包。** 数据包是**每个存档一份**的，
+新建世界时 `saves/<新世界>/datapacks/` 是空目录，起源列表里当然什么都没有。
+装完还得让游戏重新扫一次目录（退回主菜单再进），`/datapack enable` 才认得这个 id。
+这也是"我明明装过了"最容易翻车的地方：装的是旧世界，玩的是新世界。
 
 **2. 资源包要在游戏里手动启用。** `summoner_lang.zip` 是资源包，
 要放进 `resourcepacks/` 并且被 `options.txt` 的 `resourcePacks` 列表引用。
