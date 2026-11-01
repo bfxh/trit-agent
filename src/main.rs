@@ -180,10 +180,10 @@ fn selftest(flags: &Flags) {
     let mut check = |name: &str, ok: bool| {
         if ok {
             pass += 1;
-            println!("  ok   {name}");
+            println!("  √ {name}");
         } else {
             fail += 1;
-            println!("  FAIL {name}");
+            println!("  × {name}");
         }
     };
 
@@ -330,7 +330,22 @@ fn sim(flags: &Flags) {
         (10_400, 13_000, 1, 32, 0, true, "被墙挡住：想追但走不动 → 低头砍墙"),
     ];
 
-    println!("tick  phase   move strafe yaw pitch atk jump use  strategy   说明");
+    println!(
+        "{}",
+        row(&[
+            h("时间", 6),
+            h("阶段", 6),
+            h("前", 3),
+            h("横", 3),
+            h("转", 3),
+            h("仰", 3),
+            h("攻", 3),
+            h("跳", 3),
+            h("用", 3),
+            h("战法", 10),
+            h("说明", 0),
+        ])
+    );
     let mut last: Option<[Tri; 7]> = None;
     let mut last_phase = Phase::Off;
     let mut last_strat = "";
@@ -376,18 +391,27 @@ fn sim(flags: &Flags) {
         if changed || verbose {
             let dirs = &d.dirs;
             println!(
-                "{:<5} {:<7} {:^4} {:^6} {:^3} {:^5} {:^3} {:^4} {:^3}  {:<9}  {}",
-                t,
-                d.phase.name(),
-                dirs[Channel::Forward.index()].ch(),
-                dirs[Channel::Strafe.index()].ch(),
-                dirs[Channel::Yaw.index()].ch(),
-                dirs[Channel::Pitch.index()].ch(),
-                dirs[Channel::Attack.index()].ch(),
-                dirs[Channel::Jump.index()].ch(),
-                dirs[Channel::Use.index()].ch(),
-                strat,
-                format!("{}{}", scene.6, if a.world(t, t).stuck { "  [stuck]" } else { "" })
+                "{}",
+                row(&[
+                    r(&t.to_string(), 6),
+                    l(d.phase.zh(), 6),
+                    h(&dirs[Channel::Forward.index()].ch().to_string(), 3),
+                    h(&dirs[Channel::Strafe.index()].ch().to_string(), 3),
+                    h(&dirs[Channel::Yaw.index()].ch().to_string(), 3),
+                    h(&dirs[Channel::Pitch.index()].ch().to_string(), 3),
+                    h(&dirs[Channel::Attack.index()].ch().to_string(), 3),
+                    h(&dirs[Channel::Jump.index()].ch().to_string(), 3),
+                    h(&dirs[Channel::Use.index()].ch().to_string(), 3),
+                    l(strat, 10),
+                    l(
+                        &format!(
+                            "{}{}",
+                            scene.6,
+                            if a.world(t, t).stuck { "  [卡住]" } else { "" }
+                        ),
+                        0
+                    ),
+                ]),
             );
             last = Some(*dirs);
             last_phase = d.phase;
@@ -412,13 +436,75 @@ fn sim(flags: &Flags) {
     }
 
     println!();
-    println!("move 列的三段：+) 追  o) 站住  -) 后退");
+    println!("「前」这一列有三段：+) 追上去   o) 站住不动   -) 后退");
     println!("中间那一段是这次从 mob mod 移植过来的 —— 原版 Goal 只有「靠近」和「开火」，");
     println!("没有「位置刚好」这一档，所以 NPC 会一路挤到你脸上。");
     println!("x 估算位移 {} 格（13 秒）", (mx * 10.0).round() / 10.0);
 }
 
 // ---------------------------------------------------------------- sim --gather
+
+// ---------------------------------------------------------------- 演示表格
+
+/// 单元格对齐方式。中文占两列，数字要右对齐才对得齐末尾。
+#[derive(Clone, Copy)]
+enum Align {
+    Left,
+    Right,
+    Center,
+}
+
+/// 按**显示列宽**拼一行表格。
+///
+/// `format!("{:<7}", "砍伐")` 补 5 个空格，显示出来却有 9 列 —— 中文占两列，
+/// 而 `{:<}` 数的是字符数。演示表格要给人看，对不齐就等于没做，
+/// 所以这里统一走 [`trit_agent::text`] 的列宽函数。
+///
+/// 宽度传 0 表示「这是最后一列，不补空格」。
+fn row(cells: &[(String, usize, Align)]) -> String {
+    let mut out = String::new();
+    for (i, (s, w, a)) in cells.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        if *w == 0 {
+            out.push_str(s);
+            continue;
+        }
+        out.push_str(&match a {
+            Align::Left => trit_agent::text::lpad(s, *w),
+            Align::Right => trit_agent::text::rpad(s, *w),
+            Align::Center => trit_agent::text::cpad(s, *w),
+        });
+    }
+    out
+}
+
+/// 表头的一格：居中。
+fn h(s: &str, w: usize) -> (String, usize, Align) {
+    (s.to_string(), w, Align::Center)
+}
+
+/// 文字的格子：左对齐。
+fn l(s: &str, w: usize) -> (String, usize, Align) {
+    (s.to_string(), w, Align::Left)
+}
+
+/// 数字的格子：右对齐。
+fn r(s: &str, w: usize) -> (String, usize, Align) {
+    (s.to_string(), w, Align::Right)
+}
+
+/// 「攻击」那一列的三种状态：按住砍 / 单击 / 不按。
+fn atk_cell(d: &trit_agent::fsm::Decision) -> &'static str {
+    if d.attack_hold {
+        "按住"
+    } else if d.dirs[Channel::Attack.index()] == Tri::Pos {
+        "点"
+    } else {
+        "-"
+    }
+}
 
 /// 采集演示：把「什么时候不该砍」逐秒演一遍。
 ///
@@ -447,7 +533,19 @@ mode = hold
         (21_000, 23_000, 3, 0, 0, 20.0, 15_000, "血回满但天黑了 → 夜里不砍"),
     ];
 
-    println!("tick  phase   gather  why          move pitch atk   说明");
+    println!(
+        "{}",
+        row(&[
+            h("时间", 6),
+            h("阶段", 6),
+            h("采集", 8),
+            h("原因", 10),
+            h("前", 4),
+            h("仰", 5),
+            h("攻击", 5),
+            h("说明", 0),
+        ])
+    );
     let mut last: Option<(Phase, trit_agent::gather::Mode, trit_agent::gather::Why, Tri, Tri, bool)> =
         None;
     // 模拟的视线俯仰角。真实环境里这是数据包报上来的绝对值；
@@ -511,20 +609,16 @@ mode = hold
         );
         if last != Some(key) || verbose {
             println!(
-                "{:<5} {:<7} {:<7} {:<12} {:^4} {:^5} {:<5} {} [p={:>4.0}]",
-                t,
-                d.phase.name(),
-                a.gather.mode.name(),
-                a.gather.why.as_str(),
-                d.dirs[Channel::Forward.index()].ch(),
-                d.dirs[Channel::Pitch.index()].ch(),
-                if d.attack_hold {
-                    "按住"
-                } else if d.dirs[Channel::Attack.index()] == Tri::Pos {
-                    "点"
-                } else {
-                    "-"
-                },
+                "{} {} [俯仰={:>4.0}]",
+                row(&[
+                    r(&t.to_string(), 6),
+                    l(d.phase.zh(), 6),
+                    l(a.gather.mode.name(), 8),
+                    l(a.gather.why.as_str(), 10),
+                    h(&d.dirs[Channel::Forward.index()].ch().to_string(), 4),
+                    h(&d.dirs[Channel::Pitch.index()].ch().to_string(), 5),
+                    l(atk_cell(&d), 5),
+                ]),
                 sc.7,
                 cur_pitch
             );
@@ -576,7 +670,19 @@ mode = hold
         (13_000, 20_000, 2, Block::Solid, Block::Ore, 1, "恢复正常 → 继续挖"),
         ];
 
-    println!("tick  phase   gather  why          move pitch atk   说明");
+    println!(
+        "{}",
+        row(&[
+            h("时间", 6),
+            h("阶段", 6),
+            h("采集", 8),
+            h("原因", 10),
+            h("前", 4),
+            h("仰", 5),
+            h("攻击", 5),
+            h("说明", 0),
+        ])
+    );
     let mut last: Option<(Phase, trit_agent::gather::Mode, trit_agent::gather::Why, Tri, Tri, bool)> =
         None;
     let mut cur_pitch = 0.0f32;
@@ -638,20 +744,16 @@ mode = hold
         );
         if last != Some(key) || verbose {
             println!(
-                "{:<5} {:<7} {:<7} {:<12} {:^4} {:^5} {:<5} {} [p={:>4.0}]",
-                t,
-                d.phase.name(),
-                a.gather.mode.name(),
-                a.gather.why.as_str(),
-                d.dirs[Channel::Forward.index()].ch(),
-                d.dirs[Channel::Pitch.index()].ch(),
-                if d.attack_hold {
-                    "按住"
-                } else if d.dirs[Channel::Attack.index()] == Tri::Pos {
-                    "点"
-                } else {
-                    "-"
-                },
+                "{} {} [俯仰={:>4.0}]",
+                row(&[
+                    r(&t.to_string(), 6),
+                    l(d.phase.zh(), 6),
+                    l(a.gather.mode.name(), 8),
+                    l(a.gather.why.as_str(), 10),
+                    h(&d.dirs[Channel::Forward.index()].ch().to_string(), 4),
+                    h(&d.dirs[Channel::Pitch.index()].ch().to_string(), 5),
+                    l(atk_cell(&d), 5),
+                ]),
                 sc.6,
                 cur_pitch
             );
@@ -685,7 +787,10 @@ fn probe(flags: &Flags) {
         match trit_agent::act::win32::find_window(&cfg.window_title) {
             Some((h, t)) => println!("窗口: 0x{h:x} 标题=\"{t}\""),
             None => {
-                println!("窗口: 未找到标题含 \"{}\" 的窗口", cfg.window_title);
+                println!(
+                    "窗口: 未找到游戏窗口（类名 GLFW* 或标题含 \"{}\"）",
+                    cfg.window_title
+                );
                 println!("候选窗口（前 20 个）：");
                 for w in trit_agent::act::win32::list_windows().into_iter().take(20) {
                     println!("  - {w}");

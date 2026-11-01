@@ -1,4 +1,6 @@
 {
+  "name": "肉体脆弱",
+  "description": "生命上限 -2 颗心。",
   "type": "origins:attribute",
   "modifiers": [
     {

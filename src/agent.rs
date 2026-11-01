@@ -577,53 +577,61 @@ impl Agent {
         let head = it.next().unwrap_or("").to_ascii_lowercase();
         let arg = it.next().unwrap_or("").to_ascii_lowercase();
         let on = !matches!(arg.as_str(), "off" | "0" | "false" | "关");
+        // 回显统一用「开 / 关」。以前每个分支各写一遍 on/off，结果
+        // `!attack off` 回的是 `attack off` —— 敲中文进去、英文出来，
+        // 还得想一下 off 指的是「关掉了」还是「没关掉」。
+        let sw = |b: bool| if b { "开" } else { "关" };
         let reply = match head.as_str() {
             "ai" | "on" | "off" => {
                 let v = if head == "off" { false } else { on };
                 self.arm(v);
-                format!("ai {}", if v { "on" } else { "off" })
+                if v {
+                    "AI 已接管".to_string()
+                } else {
+                    "AI 已交还控制（松手 · 切回第一视角 · 标题标记）".to_string()
+                }
             }
             "panic" | "stop" => {
                 self.arm(false);
                 self.release_all();
-                "panic: released".to_string()
+                "急停：已松开所有按键".to_string()
             }
             "mode" => {
                 self.cfg.mode = Mode::parse(&arg);
                 self.behaviors = Behaviors::new(&self.cfg);
-                format!("mode {}", self.cfg.mode.as_str())
+                format!("行为模式 → {}", self.cfg.mode.as_str())
             }
             "attack" => {
                 self.set_channel(Channel::Attack, on);
-                format!("attack {}", if on { "on" } else { "off" })
+                format!("攻击通道 {}", sw(on))
             }
             "move" => {
                 self.set_channel(Channel::Forward, on);
                 self.set_channel(Channel::Strafe, on);
-                format!("move {}", if on { "on" } else { "off" })
+                format!("移动通道 {}", sw(on))
             }
             "look" => {
                 self.set_channel(Channel::Yaw, on);
                 self.set_channel(Channel::Pitch, on);
-                format!("look {}", if on { "on" } else { "off" })
+                format!("视角通道 {}", sw(on))
             }
             "jump" => {
                 self.set_channel(Channel::Jump, on);
-                format!("jump {}", if on { "on" } else { "off" })
+                format!("跳跃通道 {}", sw(on))
             }
             "use" => {
                 self.set_channel(Channel::Use, on);
-                format!("use {}", if on { "on" } else { "off" })
+                format!("使用通道 {}", sw(on))
             }
             "threat" => {
                 self.threat = Tri::Pos;
                 self.contact_until = now_ms + 8000;
-                "threat marked".to_string()
+                "已标记威胁：8 秒内按交战处理".to_string()
             }
             "calm" => {
                 self.threat = Tri::Neg;
                 self.contact_until = 0;
-                "calm".to_string()
+                "威胁已清除".to_string()
             }
             "tac" => {
                 let t = &mut self.cfg.tactics;
@@ -648,9 +656,9 @@ impl Agent {
                 self.tactics_line()
             }
             "status" => format!(
-                "{} phase={} hp={} {} {} {} {}",
-                if self.armed { "armed" } else { "off" },
-                self.machine.phase.name(),
+                "{} 阶段={} 血量={} {} {} {} {}",
+                if self.armed { "运行中" } else { "已停机" },
+                self.machine.phase.zh(),
                 self.hp.map(|h| format!("{h:.1}")).unwrap_or("?".into()),
                 self.tactics_line(),
                 self.strategy_line(),
@@ -662,24 +670,24 @@ impl Agent {
                 "on" | "1" => {
                     self.cfg.squad.enabled = true;
                     self.squad.cfg.enabled = true;
-                    "squad on".to_string()
+                    "小队已开启".to_string()
                 }
                 "off" | "0" => {
                     self.cfg.squad.enabled = false;
                     self.squad.cfg.enabled = false;
                     self.squad.set_manual(None);
-                    "squad off".to_string()
+                    "小队已关闭".to_string()
                 }
                 "auto" => {
                     self.squad.set_manual(None);
-                    "squad auto".to_string()
+                    "小队：意图交回自动判断".to_string()
                 }
                 other => match crate::squad::Intent::parse(other) {
                     Some(i) => {
                         self.squad.set_manual(Some(i));
-                        format!("squad manual {}", i.name())
+                        format!("小队 手动 → {}", i.name())
                     }
-                    None => "? !squad on|off|auto|hold|engage|regroup|recall".to_string(),
+                    None => "用法：!squad on|off|auto|待命|交战|集合|召回".to_string(),
                 },
             },
             "strat" => match arg.as_str() {
@@ -697,7 +705,7 @@ impl Agent {
                     self.cfg.strategies.blitz = false;
                     self.cfg.strategies.ambush = false;
                     self.cfg.strategies.feint = false;
-                    "strat all off".to_string()
+                    "战法：全部关闭".to_string()
                 }
                 other => {
                     let s = &mut self.cfg.strategies;
@@ -716,43 +724,37 @@ impl Agent {
                 "" => self.gather.line(&self.cfg.gather),
                 "on" | "1" => {
                     self.cfg.gather.enabled = true;
-                    format!("gather on ({})", self.gather.line(&self.cfg.gather))
+                    format!("采集已开启（{}）", self.gather.line(&self.cfg.gather))
                 }
                 "off" | "0" => {
                     self.cfg.gather.enabled = false;
                     self.gather.reset();
-                    "gather off".to_string()
+                    "采集已关闭".to_string()
                 }
                 // 清配额和冷却：卡住了不想等 30 秒就敲这个
                 "reset" => {
                     self.gather.reset();
-                    "gather reset".to_string()
+                    "采集已重置：配额清零、冷却解除".to_string()
                 }
                 "night" => {
                     self.cfg.gather.allow_night = !self.cfg.gather.allow_night;
-                    format!(
-                        "gather night {}",
-                        if self.cfg.gather.allow_night { "on" } else { "off" }
-                    )
+                    format!("夜间采集 {}", sw(self.cfg.gather.allow_night))
                 }
                 // 换目标：砍树 / 挖矿。换的时候必须清状态 —— 上一趟的配额和
                 // 「正在砍第几棵」对新的目标毫无意义，留着只会让计数莫名其妙。
                 "wood" | "tree" | "木" => {
                     self.cfg.gather.target = crate::gather::Target::Wood;
                     self.gather.reset();
-                    format!("gather target ({})", self.gather.line(&self.cfg.gather))
+                    format!("采集目标 → 木头（{}）", self.gather.line(&self.cfg.gather))
                 }
                 "ore" | "mine" | "矿" => {
                     self.cfg.gather.target = crate::gather::Target::Ore;
                     self.gather.reset();
-                    format!("gather target ({})", self.gather.line(&self.cfg.gather))
+                    format!("采集目标 → 矿石（{}）", self.gather.line(&self.cfg.gather))
                 }
                 "fast" => {
                     self.cfg.gather.fast_bridge = !self.cfg.gather.fast_bridge;
-                    format!(
-                        "gather fast {}",
-                        if self.cfg.gather.fast_bridge { "on" } else { "off" }
-                    )
+                    format!("快通道（低延迟感知）{}", sw(self.cfg.gather.fast_bridge))
                 }
                 // 实测感知延迟。这是判断「数据包到底装没装上 / 快通道开没开」
                 // 的唯一办法 —— 光看日志里有没有 <TRITF 也行，但这个更直接。
@@ -770,14 +772,19 @@ impl Agent {
                 other => {
                     if let Ok(v) = other.parse::<u32>() {
                         self.cfg.gather.quota = v.min(1_000);
-                        format!("gather quota {}", self.cfg.gather.quota)
+                        format!("采集配额 → {} 个", self.cfg.gather.quota)
                     } else {
-                        "? !gather on|off|reset|night|wood|ore|fast|lag|<配额>".to_string()
+                        "用法：!gather on|off|reset|night|wood|ore|fast|lag|<配额>".to_string()
                     }
                 }
             },
-            _ => "? !ai !mode !tac !strat !squad !gather !attack !move !look !jump !use !threat !calm !status"
-                .to_string(),
+            _ => concat!(
+                "指令：!ai 开关 | !mode 待命/巡逻/跟随 | !status 状态 | ",
+                "!attack !move !look !jump !use 单通道开关 | ",
+                "!threat 标记威胁 | !calm 清除威胁 | !tac 战术判据 | ",
+                "!strat 战法 | !squad 共同意识 | !gather 采集"
+            )
+            .to_string(),
         };
         reply
     }
@@ -801,11 +808,14 @@ impl Agent {
     }
 
     /// 战术开关的一行摘要，给 `!status` 和 `!tac` 用。
+    ///
+    /// 四项写成中文标签而不是 `tac=++++`：那串加号只有写代码的人看得懂，
+    /// 而 `!tac` 是给玩的人用的 —— 他需要的是知道"现在关掉了哪一条"。
     fn tactics_line(&self) -> String {
         let t = &self.cfg.tactics;
-        let on = |b: bool| if b { "+" } else { "-" };
+        let on = |b: bool| if b { "开" } else { "关" };
         format!(
-            "tac={}{}{}{}",
+            "战术[保持距离{} 规避爆炸{} 举盾{} 破墙{}]",
             on(t.range),
             on(t.hazard),
             on(t.guard),
@@ -2006,14 +2016,16 @@ mode = hold
     #[test]
     fn gather_command_toggles_and_reports() {
         let mut a = forager();
+        // 回显是给人看的，所以断言中文。之前这些断言查的是 "off" / "quota 8"，
+        // 汉化后必须跟着改 —— 否则测试反而在强迫界面保持英文。
         assert!(a.command("gather", 0).contains("gather="));
-        assert!(a.command("gather off", 0).contains("off"));
+        assert!(a.command("gather off", 0).contains("关闭"));
         assert!(!a.cfg.gather.enabled);
-        assert!(a.command("gather on", 0).contains("on"));
+        assert!(a.command("gather on", 0).contains("开启"));
         assert!(a.cfg.gather.enabled);
-        assert!(a.command("gather 8", 0).contains("quota 8"));
+        assert!(a.command("gather 8", 0).contains("配额 → 8"));
         assert_eq!(a.cfg.gather.quota, 8);
-        assert!(a.command("gather night", 0).contains("night on"));
+        assert!(a.command("gather night", 0).contains("夜间采集 开"));
         assert!(a.cfg.gather.allow_night);
     }
 
@@ -2131,12 +2143,41 @@ mode = hold
 
     // ---------------------------------------------------------- 战法 / 共同意识
 
+    /// 每条指令的回显都必须带中文。
+    ///
+    /// 这条测试挡的是「加了新指令，回显顺手写成英文」—— 那种事不会报错，
+    /// 也没有测试会失败，只有玩的人看到一行 `squad manual engage` 时才发觉。
+    /// 参数里的 on/off、`gather=` 这种键名不算漏，它们是指令语法本身，
+    /// 所以判据只看「有没有至少一个汉字」。
+    #[test]
+    fn every_command_reply_contains_chinese() {
+        let mut a = forager();
+        let cmds = [
+            "ai on", "ai off", "on", "off", "panic", "stop", "mode hold", "mode patrol",
+            "mode follow", "attack off", "attack on", "move off", "move on", "look off",
+            "look on", "jump off", "use off", "threat", "calm", "status", "tac", "tac guard",
+            "tac off", "tac on", "strat", "strat off", "strat on", "strat ambush", "squad",
+            "squad on", "squad off", "squad auto", "squad hold", "squad engage", "squad regroup",
+            "squad recall", "squad 乱写", "gather", "gather on", "gather off", "gather reset",
+            "gather night", "gather wood", "gather ore", "gather fast", "gather lag", "gather 8",
+            "gather 乱写", "完全没这条指令",
+        ];
+        for cmd in cmds {
+            let reply = a.command(cmd, 0);
+            assert!(!reply.is_empty(), "!{cmd} 没有任何回显");
+            let has_cjk = reply
+                .chars()
+                .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c));
+            assert!(has_cjk, "!{cmd} 的回显是纯英文/符号：{reply}");
+        }
+    }
+
     #[test]
     fn status_line_reports_strategy_and_squad() {
         let mut a = agent();
         let s = a.command("status", 0);
         assert!(s.contains("strat="), "状态行要看得到战法: {s}");
-        assert!(s.contains("squad="), "状态行要看得到共同意识: {s}");
+        assert!(s.contains("小队="), "状态行要看得到共同意识: {s}");
     }
 
     #[test]

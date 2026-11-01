@@ -8,5 +8,5 @@
 execute at @s run tag @e[type=minecraft:wolf,distance=..16,limit=3,sort=nearest] add trit_hound
 execute at @s run tag @e[type=minecraft:iron_golem,distance=..16,limit=2,sort=nearest] add trit_golem
 
-execute at @s run tellraw @a {"text":"[squad] 已收编：","color":"green"}
+execute at @s run tellraw @a {"text":"[小队] 已收编：","color":"green"}
 execute at @s run tellraw @a [{"selector":"@e[tag=trit_hound]"},{"text":" 只狼  +  "},{"selector":"@e[tag=trit_golem]"},{"text":" 只傀儡"}]

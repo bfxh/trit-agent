@@ -1,4 +1,6 @@
 {
+  "name": "召唤铁卫",
+  "description": "副技能：召唤强化铁傀儡（250 血 / 25 攻击 / 免击退 / 抗性 + 回复）。45 秒冷却，重放会替换旧铁卫。",
   "type": "origins:active_self",
   "cooldown": 900,
   "key": "key.origins.secondary_active",

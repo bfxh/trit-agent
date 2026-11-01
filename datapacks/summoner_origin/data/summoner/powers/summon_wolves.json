@@ -1,4 +1,6 @@
 {
+  "name": "召唤战狼",
+  "description": "主技能：召唤 3 只战狼（60 血 / 10 攻击 / 10 护甲 / 抗火 + 力量）。30 秒冷却，重放会替换旧战狼。",
   "type": "origins:active_self",
   "cooldown": 600,
   "key": "key.origins.primary_active",

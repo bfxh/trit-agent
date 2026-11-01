@@ -139,7 +139,7 @@ pub fn to_balanced(mut v: i64) -> Vec<Tri> {
     let mut out = Vec::new();
     while v != 0 {
         // 余数取到 [-1,0,1]
-        let r = ((v % 3) + 3) % 3; // 0,1,2
+        let r = v.rem_euclid(3); // 0,1,2
         let (trit, carry) = match r {
             0 => (Tri::Zero, 0),
             1 => (Tri::Pos, 1),

@@ -24,9 +24,9 @@ impl Mode {
     }
     pub fn as_str(self) -> &'static str {
         match self {
-            Mode::Hold => "hold",
-            Mode::Patrol => "patrol",
-            Mode::Follow => "follow",
+            Mode::Hold => "原地待命",
+            Mode::Patrol => "巡逻",
+            Mode::Follow => "跟随",
         }
     }
 }

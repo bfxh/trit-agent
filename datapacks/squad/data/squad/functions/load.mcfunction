@@ -8,6 +8,6 @@ scoreboard objectives add squad_timer dummy
 scoreboard players set #mode squad_mode 0
 scoreboard players set #timer squad_timer 0
 
-tellraw @a {"text":"[squad] 共同意识已加载。","color":"green"}
+tellraw @a {"text":"[小队] 共同意识已加载。","color":"green"}
 tellraw @a {"text":"  /function squad:recruit  收编身边的傀儡和狼（16 格内）","color":"gray"}
 tellraw @a {"text":"  /function squad:hold|engage|regroup|recall  手动下令","color":"gray"}

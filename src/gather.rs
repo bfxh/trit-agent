@@ -43,8 +43,8 @@ pub enum Target {
 impl Target {
     pub fn name(self) -> &'static str {
         match self {
-            Target::Wood => "wood",
-            Target::Ore => "ore",
+            Target::Wood => "木头",
+            Target::Ore => "矿石",
         }
     }
     pub fn parse(s: &str) -> Option<Target> {
@@ -89,15 +89,19 @@ pub enum Mode {
 }
 
 impl Mode {
+    /// 给人看的中文名（`!gather`、演示表格）。
+    ///
+    /// 日志里的 `Decision::encode` 走的是 `Phase::name`，和这里无关 ——
+    /// 所以改中文不会破坏 `trit-agent-run.log` 的机器可读格式。
     pub fn name(self) -> &'static str {
         match self {
-            Mode::Off => "off",
-            Mode::Wait => "wait",
-            Mode::Approach => "walk",
-            Mode::Chop => "chop",
-            Mode::Mine => "mine",
-            Mode::Scan => "scan",
-            Mode::Cooldown => "cd",
+            Mode::Off => "停工",
+            Mode::Wait => "等安全",
+            Mode::Approach => "接近",
+            Mode::Chop => "砍伐",
+            Mode::Mine => "挖掘",
+            Mode::Scan => "扫视",
+            Mode::Cooldown => "冷却",
         }
     }
     /// 这个模式下 AI 是否该真的动手（走 / 砍 / 挖）
@@ -110,7 +114,8 @@ impl Mode {
     }
 }
 
-/// 「为什么要停工」的机器可读原因。给 `!gather` 和 sim 用。
+/// 「为什么要停工」的原因。给 `!gather` 和演示表格用 —— 中文，因为
+/// 这一层是给人读的：看到「血太少」比看到 `low_hp` 快得多。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Why {
     Disabled,
@@ -150,30 +155,30 @@ pub enum Why {
 impl Why {
     pub fn as_str(self) -> &'static str {
         match self {
-            Why::Disabled => "off",
-            Why::QuotaDone => "quota",
-            Why::Cooldown => "cd",
-            Why::Threat => "threat",
-            Why::ThreatUnknown => "threat?",
-            Why::LowHp => "low_hp",
-            Why::HpMarginal => "hp?",
-            Why::HpUnknown => "hp?",
-            Why::Hungry => "hungry",
-            Why::FoodUnknown => "food?",
-            Why::Hazard => "hazard",
-            Why::EnemyNear => "enemy_near",
-            Why::Night => "night",
-            Why::NightUnknown => "night?",
-            Why::NoWood => "no_wood",
-            Why::NoOre => "no_ore",
-            Why::TooFar => "too_far",
-            Why::LostTree => "lost",
-            Why::NoFloor => "no_floor",
-            Why::Lava => "lava",
-            Why::Blocked => "blocked",
-            Why::NoBlockData => "blk?",
-            Why::Warmup => "warmup",
-            Why::Ok => "ok",
+            Why::Disabled => "已关闭",
+            Why::QuotaDone => "配额满",
+            Why::Cooldown => "冷却中",
+            Why::Threat => "有敌人",
+            Why::ThreatUnknown => "威胁未知",
+            Why::LowHp => "血太少",
+            Why::HpMarginal => "血量临界",
+            Why::HpUnknown => "血量未知",
+            Why::Hungry => "饿了",
+            Why::FoodUnknown => "饱食未知",
+            Why::Hazard => "有爆炸源",
+            Why::EnemyNear => "敌人太近",
+            Why::Night => "天黑了",
+            Why::NightUnknown => "时间未知",
+            Why::NoWood => "没树",
+            Why::NoOre => "没矿",
+            Why::TooFar => "太远",
+            Why::LostTree => "目标丢了",
+            Why::NoFloor => "脚下悬空",
+            Why::Lava => "有岩浆",
+            Why::Blocked => "被挡住",
+            Why::NoBlockData => "方块未知",
+            Why::Warmup => "攒安全",
+            Why::Ok => "可以干",
         }
     }
     /// 这一条属于「危险」，该吃惩罚冷却；「没木头」「配额满了」这种不算。

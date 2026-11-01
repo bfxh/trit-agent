@@ -112,6 +112,29 @@
     改成运行时测帧间隔（EWMA，<30ms 视为同拍重合丢弃），等 `间隔 × 1.4 + 30`。
     另外慢帧和快帧会撞在同一 tick（20 能被 2 整除），那一帧间隔是 0，
     不滤掉会把估计一路拉到 0，于是等待变 0、AI 开始疯狂转头。
+17. **按窗口标题找游戏，在换过标题的整合包上永远找不到**。
+    `find_window` 原本是「先筛标题含 minecraft 的，再在里面挑类名 GLFW 的」。
+    但标题是整合包能改的：「烦人的村民」的窗口叫
+    `Annoying Villagers - Annoying Villagers`，全串没有 `Minecraft`。
+    于是筛完候选是空的，`find_window` 返回 `None`，AI 一个键都不发。
+    最坑的是**它不报错**：程序起得来、决策在跑、日志在写、`F8` 也正常，
+    只有游戏里毫无动静。真机上 `probe` 一把才看出来（窗口列在那里，
+    但"未找到"）。改成按权重打分：类名 GLFW* 给 100，标题命中给 10，
+    分高者中选 —— 类名是 LWJGL 写死的，比标题可靠。
+    教训：**外部标识符里，能被第三方改的那个不能当唯一依据。**
+18. **拷进 `datapacks/` 不等于装上了**。游戏只加载 `level.dat` 里
+    `Data.DataPacks.Enabled` 列出的包，新复制进去的默认是禁用。
+    症状同样是"装完了没效果"：`/function trit_bridge:on` 报 Unknown，
+    AI 拿不到任何传感器数据（`!gather lag` 显示 1000ms 以上甚至 `-1`）。
+    核查办法是解析 `level.dat` 看 `Enabled` 里有没有 `file/xxx.zip`，
+    别信"文件在目录里"。资源包同理，而且游戏**退出时**会用内存里的列表
+    覆盖 `options.txt`，开着游戏改那个文件等于白改。
+19. **数据包里的 `assets/` 不会被加载**。`summoner_origin.zip` 里放了一份
+    `assets/summoner/lang/zh_cn.json`，那是资源包的内容，数据包加载器不看。
+    中文技能名实际靠 `summoner_lang.zip` 这个**资源包**；
+    没启用它，GUI 里显示的是 `power.summoner.summon_wolves.name` 原文。
+    字面量中文写在 power 的 `name` 字段里也能兜底 —— 翻译键查不到时
+    会把键本身当文本显示，所以两边都写最稳。
 
 ## 6. 从 mob mod 移植时放弃的东西
 

@@ -473,6 +473,40 @@ AI 开着的时候直接在聊天框里打字。
 
 每一项「次操作」都能单独摘掉，摘掉后那一路通道永久 `Zero`，AI 不再碰它。
 
+### 界面语言：全中文
+
+回显、状态行、演示表格、数据包聊天消息、起源与技能名，**全部中文**。
+
+```
+!status   →  运行中 阶段=待命 血量=18.5 战术[保持距离开 规避爆炸开 举盾开 破墙开] …
+!gather   →  采集已开启（gather=等安全 目标=木头 why=攒安全 采=0 断=0(可以干) 墙=-）
+!squad    →  小队 手动 → 召回
+!gather 8 →  采集配额 → 8 个
+```
+
+`!gather lag` 那种带数字的保留量纲（`感知 102ms 一帧`），因为那是测量值不是文案。
+
+有两处**故意**不汉化：
+
+| 保留英文 | 为什么 |
+|---|---|
+| `!指令名`、`on/off`、`hold/patrol/follow` | 这些是指令语法本身，翻译了就没法敲 |
+| `trit-agent-run.log` 里的 `idle\|00+0+0` | 机器可读的定宽编码，换中文就要按列宽解析，日志工具全废 |
+| 数据包的 `<TRIT hp=… wal=…>` | 协议字段，Rust 侧按名字取值 |
+
+终端里中文占两列，`format!("{:<7}", "砍伐")` 会给 5 个空格却只显示 6 列宽 ——
+所以表格统一走 `src/text.rs` 的列宽函数（CJK 记 2 列），不是 `{:<}`。
+
+还有一条测试专门挡回归：`every_command_reply_contains_chinese`，
+把 40 多条指令跑一遍，任何一条回显里没有一个汉字就失败。
+加新指令时顺手写英文回显，会被它抓住。
+
+**起源与技能名**在另外两个地方，缺一样就显示成 `power.summoner.summon_wolves.name`：
+
+1. `data/summoner/powers/*.json` 里的 `name` / `description`（字面量中文）；
+2. `datapacks/summoner_lang` —— 这是个**资源包**，必须放进 `resourcepacks/` 并在游戏里启用。
+   数据包里的 `assets/` 不参与加载，所以 `summoner_origin.zip` 里那份 lang 是备份，不生效。
+
 ### 第三视角
 
 接管时会自动切到第三视角（默认背视）。
@@ -500,6 +534,28 @@ AI 开着的时候直接在聊天框里打字。
 
 跑完会打印 `后台暂停 N 次`，看到这个数说明中途切出去过。
 
+### 怎么认出"那是游戏窗口"
+
+**按类名，不按标题。**
+
+Minecraft 走 LWJGL3，窗口类名固定是 `GLFW30`；而**标题是整合包可以随便改的**。
+「烦人的村民」的窗口标题是 `Annoying Villagers - Annoying Villagers` ——
+整个字符串里没有 `Minecraft`。所以"先按标题过滤、再在里面找 GLFW"这种写法
+在这种整合包上**永远找不到窗口**，而控制台看起来一切正常：AI 起得来、决策在跑、
+日志在写，就是一个键都没发出去。
+
+现在的评分：
+
+| 条件 | 分 |
+|---|---|
+| 类名 `GLFW*` | +100 |
+| 标题含 `window_title` 关键字 | +10（开头再加 2） |
+
+分高者中选，0 分不算。同时开两个客户端时，用标题命中来挑对那一个。
+
+`trit-agent probe` 会把结果打出来；找不到时列出前 20 个候选窗口的
+`标题 [类名]` —— 光看标题根本分不清启动器和游戏。
+
 ## 数据包
 
 ```
@@ -516,6 +572,29 @@ datapacks/
 ```bash
 python scripts/build_datapacks.py --install "E:/MC/MC/profiles/烦人的村民"
 ```
+
+### ⚠️ 拷进去 ≠ 装上了
+
+这一步有两个坑，都会让"装完了但没效果"，而且都不报错：
+
+**1. 存档的数据包要单独启用。** 脚本只是把 zip 复制进 `saves/<世界>/datapacks/`，
+而游戏只加载 `level.dat` 里 `Enabled` 表列出的包。新放进去的默认是**禁用**。
+所以进世界后要敲：
+
+```
+/datapack list                                   # 方括号 = 未启用，花括号 = 已启用
+/datapack enable "file/summoner_origin.zip"
+/datapack enable "file/trit_bridge.zip"
+/datapack enable "file/squad.zip"
+```
+
+`level.dat` 可以用脚本解析出来核（`Data.DataPacks.Enabled`），
+看到里面没有 `file/xxx.zip` 就是没启用，吹什么都白搭。
+
+**2. 资源包要在游戏里手动启用。** `summoner_lang.zip` 是资源包，
+要放进 `resourcepacks/` 并且被 `options.txt` 的 `resourcePacks` 列表引用。
+游戏**退出时会用内存里的列表覆盖 `options.txt`** —— 游戏开着的时候改文件没用，
+要么在「选项 → 资源包」里拖过去，要么关掉游戏再改。
 
 进游戏 `/reload`，然后：
 

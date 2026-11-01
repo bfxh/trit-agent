@@ -203,18 +203,54 @@ fn enum_windows() -> Vec<WindowInfo> {
 ///
 /// 所以顺序是：标题命中且类名是 GLFW（真的游戏窗口）→ 标题以关键字开头
 /// → 标题包含关键字。
-pub fn find_window(keyword: &str) -> Option<(Hwnd, String)> {
+/// 给一个候选窗口打分，分高者中选，0 分表示不合格。
+///
+/// **类名 `GLFW*` 是决定性的**：Minecraft 走 LWJGL3，窗口类名固定是 `GLFW30`，
+/// 而标题是整合包可以随便改的 —— 「烦人的村民」的窗口标题是
+/// `Annoying Villagers - Annoying Villagers`，整个字符串里没有 "Minecraft"。
+/// 先按标题过滤再找类名，等于在这种整合包上永远找不到窗口。
+///
+/// 标题命中关键字只加分、不减分：用来在同时开了两个客户端时挑对那一个。
+pub fn window_score(title: &str, class: &str, keyword: &str) -> i32 {
+    let t = title.to_lowercase();
     let kw = keyword.to_lowercase();
-    let hits: Vec<WindowInfo> = enum_windows()
-        .into_iter()
-        .filter(|w| w.title.to_lowercase().contains(&kw))
-        .collect();
-    let pick = hits
+    let mut score = 0;
+    if class.to_uppercase().starts_with("GLFW") {
+        score += 100;
+    }
+    if !kw.is_empty() && t.contains(&kw) {
+        score += 10;
+        if t.starts_with(&kw) {
+            score += 2;
+        }
+    }
+    score
+}
+
+/// 在候选窗口里挑游戏窗口。
+///
+/// 抽成纯函数是为了能测：这里错一次，AI 就是「跑起来了但一个键都没发出去」，
+/// 而控制台看起来一切正常。
+pub fn pick_window(cands: &[(String, String)], keyword: &str) -> Option<usize> {
+    let mut best: Option<(usize, i32)> = None;
+    for (i, (title, class)) in cands.iter().enumerate() {
+        let s = window_score(title, class, keyword);
+        if s > 0 && best.map(|(_, b)| s > b).unwrap_or(true) {
+            best = Some((i, s));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+pub fn find_window(keyword: &str) -> Option<(Hwnd, String)> {
+    let all = enum_windows();
+    let pairs: Vec<(String, String)> = all
         .iter()
-        .find(|w| w.class.to_uppercase().starts_with("GLFW"))
-        .or_else(|| hits.iter().find(|w| w.title.to_lowercase().starts_with(&kw)))
-        .or_else(|| hits.first());
-    pick.map(|w| (w.hwnd, w.title.clone()))
+        .map(|w| (w.title.clone(), w.class.clone()))
+        .collect();
+    let i = pick_window(&pairs, keyword)?;
+    let w = &all[i];
+    Some((w.hwnd, w.title.clone()))
 }
 
 /// 列出所有可见窗口，找不到游戏时用来排查。
@@ -561,8 +597,58 @@ impl Hotkeys {
 mod tests {
     use super::*;
 
+    /// 候选窗口。真机上抓到的这一条是这次修复的起因：
+    /// 整合包「烦人的村民」的窗口标题叫 `Annoying Villagers - ...`，
+    /// 全串没有 "Minecraft"，而类名是 `GLFW30`。
+    fn w(title: &str, class: &str) -> (String, String) {
+        (title.to_string(), class.to_string())
+    }
+
     #[test]
-    fn typed_charset_covers_every_command_we_send() {
+    fn glfw_class_wins_even_when_the_title_was_replaced() {
+        let cands = vec![
+            w("WorkBuddy", "Chrome_WidgetWin_1"),
+            w("Axolotl Launcher", "Tauri Window"),
+            w("Annoying Villagers - Annoying Villagers", "GLFW30"),
+            w("烦人的村民 - 文件资源管理器", "CabinetWClass"),
+        ];
+        let i = pick_window(&cands, "minecraft").expect("类名 GLFW30 就该认出来");
+        assert_eq!(
+            cands[i].1, "GLFW30",
+            "标题里没有 minecraft 不代表它不是游戏窗口"
+        );
+    }
+
+    #[test]
+    fn title_keyword_still_works_without_a_glfw_window() {
+        let cands = vec![
+            w("记事本", "Notepad"),
+            w("Minecraft 1.18.2", "SunAwtFrame"),
+        ];
+        let i = pick_window(&cands, "minecraft").expect("标题命中也要能选中");
+        assert_eq!(i, 1);
+    }
+
+    #[test]
+    fn two_clients_prefer_the_one_matching_the_keyword() {
+        // 同时开两个客户端：类名都是 GLFW30，靠标题分
+        let cands = vec![
+            w("Minecraft 1.18.2", "GLFW30"),
+            w("另一个整合包", "GLFW30"),
+        ];
+        let i = pick_window(&cands, "minecraft").expect("应该挑中标题命中的那个");
+        assert_eq!(i, 0);
+    }
+
+    #[test]
+    fn no_candidate_means_none() {
+        assert!(pick_window(&[], "minecraft").is_none());
+        let cands = vec![w("记事本", "Notepad"), w("Chrome", "Chrome_WidgetWin_1")];
+        assert!(pick_window(&cands, "minecraft").is_none());
+    }
+
+    #[test]
+    fn typing_charset_covers_every_command_we_send() {
         // `squad` 的四个指令 + 可能的 /execute 参数形式
         let sample = "/function squad:engage";
         for c in sample.chars().filter(|c| *c != '/') {

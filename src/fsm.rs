@@ -219,6 +219,21 @@ pub enum Phase {
 }
 
 impl Phase {
+    /// 给人看的中文名。
+    ///
+    /// 单独一个方法而不是改 [`Phase::name`]：`name()` 是
+    /// `Decision::encode` 写进 `trit-agent-run.log` 的段名，
+    /// 换成中文会让日志从「一行固定宽度的 ASCII」变成需要按列宽解析的东西。
+    pub fn zh(self) -> &'static str {
+        match self {
+            Phase::Off => "停机",
+            Phase::Idle => "待命",
+            Phase::Engage => "交战",
+            Phase::Retreat => "撤退",
+            Phase::Recover => "重生",
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Phase::Off => "off",

@@ -61,12 +61,14 @@ pub enum Intent {
 }
 
 impl Intent {
+    /// 给人看的中文名。给 `!squad` 回显和状态行用；
+    /// 真正下发给数据包的是 [`Intent::command`]，两边互不影响。
     pub fn name(self) -> &'static str {
         match self {
-            Intent::Hold => "hold",
-            Intent::Engage => "engage",
-            Intent::Regroup => "regroup",
-            Intent::Recall => "recall",
+            Intent::Hold => "待命",
+            Intent::Engage => "交战",
+            Intent::Regroup => "集合",
+            Intent::Recall => "召回",
         }
     }
     pub fn all() -> [Intent; 4] {
@@ -264,8 +266,8 @@ impl Squad {
 
     pub fn line(&self, channel: &str) -> String {
         format!(
-            "squad={} @{} intent={}{} sent={} skip={}",
-            if self.cfg.enabled { "on" } else { "off" },
+            "小队={} 通道={} 意图={}{} 已发={} 跳过={}",
+            if self.cfg.enabled { "开" } else { "关" },
             channel,
             self.intent.name(),
             match self.manual {
