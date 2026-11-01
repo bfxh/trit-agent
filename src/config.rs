@@ -82,6 +82,61 @@ impl Default for Tactics {
     }
 }
 
+/// 采集（砍树 / 挖矿）的判据参数。
+///
+/// 全部围绕一件事：**什么时候不许动手**。所以这里的阈值大多是"下限"，
+/// 低于就不干，而不是"高于就干"。
+#[derive(Clone, Copy, Debug)]
+pub struct GatherCfg {
+    /// 总开关。默认关 —— 采集会主动改变世界（砍掉你的树），
+    /// 不该是默认行为。
+    pub enabled: bool,
+    /// 血量低于这个比例就不采集。砍树时视线朝下、背对空地，挨打很难受。
+    pub min_hp: f32,
+    /// 饱食度低于等于这个值就不采集。饿着砍完跑不动，也不能回血。
+    pub min_food: i32,
+    /// 夜里是否照常采集。默认 false：夜间刷怪密度高好几倍。
+    pub allow_night: bool,
+    /// 一趟砍够多少棵就休息（0 = 不限制）
+    pub quota: u32,
+    /// 配额满了以后歇多久，然后自动开下一趟
+    pub rest_ms: u64,
+    /// 连续安全多少毫秒才允许开工。这个「攒窗口」是防抽搐的关键。
+    pub enter_ms: u64,
+    /// 被危险打断后多久不再开工
+    pub cooldown_ms: u64,
+    /// 采集过程中多久插播一次抬头扫视（0 = 不扫）
+    pub scan_every_ms: u64,
+    /// 每次扫视持续多久。这段时间不砍也不走，只转视角。
+    pub scan_ms: u64,
+    /// 走到这个距离（格）就开始砍。原版手臂能到 4.5，留点余量。
+    pub reach: f32,
+    /// 看得见但超过这个距离就不去（格）
+    pub max_walk: f32,
+    /// 单棵树砍多久还没断就放弃（毫秒）。判断错了别在那儿杵着。
+    pub max_chop_ms: u64,
+}
+
+impl Default for GatherCfg {
+    fn default() -> Self {
+        GatherCfg {
+            enabled: false,
+            min_hp: 0.65,
+            min_food: 7,
+            allow_night: false,
+            quota: 16,
+            rest_ms: 30_000,
+            enter_ms: 2_500,
+            cooldown_ms: 8_000,
+            scan_every_ms: 1_600,
+            scan_ms: 350,
+            reach: 3.2,
+            max_walk: 20.0,
+            max_chop_ms: 25_000,
+        }
+    }
+}
+
 /// 指令通道。决定「共同意识」用哪条路把意图传给从属实体。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ControlChannel {
@@ -144,6 +199,9 @@ pub struct Config {
     pub squad: crate::squad::SquadCfg,
     pub squad_control: ControlChannel,
 
+    /// 采集（砍树）。判据见 [`crate::gather`]。
+    pub gather: GatherCfg,
+
     pub attack_interval_ms: u64,
     pub jump_crit_every: u32,
     pub strafe_flip_ms: u64,
@@ -187,6 +245,7 @@ impl Default for Config {
             strategies: crate::strategy::Strategies::default(),
             squad: crate::squad::SquadCfg::default(),
             squad_control: ControlChannel::Off,
+            gather: GatherCfg::default(),
             attack_interval_ms: 620,
             jump_crit_every: 2,
             strafe_flip_ms: 900,
@@ -348,6 +407,50 @@ impl Config {
         if let Some(v) = g("squad_cmd_gap_ms").and_then(|v| v.parse::<u64>().ok()) {
             c.squad.min_interval_ms = v.clamp(200, 30_000);
         }
+
+        // ---- 采集 ----
+        if let Some(v) = g("gather").and_then(|v| parse_bool(&v)) {
+            c.gather.enabled = v;
+        }
+        if let Some(v) = g("gather_min_hp").and_then(|v| v.parse::<f32>().ok()) {
+            c.gather.min_hp = v.clamp(0.1, 0.95);
+        }
+        if let Some(v) = g("gather_min_food").and_then(|v| v.parse::<i32>().ok()) {
+            c.gather.min_food = v.clamp(0, 20);
+        }
+        if let Some(v) = g("gather_night").and_then(|v| parse_bool(&v)) {
+            c.gather.allow_night = v;
+        }
+        if let Some(v) = g("gather_quota").and_then(|v| v.parse::<u32>().ok()) {
+            c.gather.quota = v.min(1_000);
+        }
+        if let Some(v) = g("gather_rest_ms").and_then(|v| v.parse::<u64>().ok()) {
+            c.gather.rest_ms = v.clamp(1_000, 600_000);
+        }
+        if let Some(v) = g("gather_enter_ms").and_then(|v| v.parse::<u64>().ok()) {
+            c.gather.enter_ms = v.clamp(0, 60_000);
+        }
+        if let Some(v) = g("gather_cooldown_ms").and_then(|v| v.parse::<u64>().ok()) {
+            c.gather.cooldown_ms = v.clamp(0, 300_000);
+        }
+        if let Some(v) = g("gather_scan_every_ms").and_then(|v| v.parse::<u64>().ok()) {
+            c.gather.scan_every_ms = v.clamp(0, 60_000);
+        }
+        if let Some(v) = g("gather_scan_ms").and_then(|v| v.parse::<u64>().ok()) {
+            c.gather.scan_ms = v.clamp(0, 10_000);
+        }
+        if let Some(v) = g("gather_reach").and_then(|v| v.parse::<f32>().ok()) {
+            // 下限 3.0 不是随便定的：数据包最近的原木探测档就是 3 格。
+            // 允许设到 3 以下的话，`wood_dist(3) == 3.0 > reach` 永远成立，
+            // 角色会一直往树里挤却永远不开始砍。
+            c.gather.reach = v.clamp(3.0, 4.4);
+        }
+        if let Some(v) = g("gather_max_walk").and_then(|v| v.parse::<f32>().ok()) {
+            c.gather.max_walk = v.clamp(2.0, 64.0);
+        }
+        if let Some(v) = g("gather_max_chop_ms").and_then(|v| v.parse::<u64>().ok()) {
+            c.gather.max_chop_ms = v.clamp(1_000, 300_000);
+        }
         c
     }
 }
@@ -440,6 +543,34 @@ tac_guard = true
 # 卡住 1.2 秒就低头砍墙
 tac_breach = true
 
+# ---- 采集（砍树 / 挖矿）----
+# 默认关：采集会主动改变世界（砍掉你的树、砍掉你的房子）。
+# 打开后 AI 只在「明确安全」时动手，判据见 README「什么时候不该砍」。
+gather = false
+# 血低于这个比例就不砍（0.65 = 13 点血）
+gather_min_hp = 0.65
+# 饱食度低于等于这个数就不砍 —— 饿着砍完跑不动，也不能回血
+gather_min_food = 7
+# 夜里是否照常砍。默认 false：夜间刷怪密度高好几倍
+gather_night = false
+# 一趟砍够多少棵就休息（0 = 不限制）
+gather_quota = 16
+# 配额满了歇多久再开下一趟
+gather_rest_ms = 30000
+# 连续安全多少毫秒才允许开工。这个「攒窗口」是防止砍两下跑一下的关键
+gather_enter_ms = 2500
+# 被威胁打断后多久不再开工。没有这个，怪物一走远就回去砍、砍两下又跑
+gather_cooldown_ms = 8000
+# 采集过程中每多久抬头扫视一次，每次看多久（秒级，别设太小）
+gather_scan_every_ms = 1600
+gather_scan_ms = 350
+# 走到这个距离就开始砍（原版手臂 4.5 格，留余量）
+gather_reach = 3.2
+# 看得见但超过这个距离就不去
+gather_max_walk = 20.0
+# 一棵树砍多久还没断就放弃（多半是判断错了：树在墙后/在坡上）
+gather_max_chop_ms = 25000
+
 # ---- 战法（孙子兵法）：一次只生效一条，优先级 走为上 > 以逸待劳 > 兵贵神速 > 围点打援 > 声东击西 ----
 # 走为上：血 < 35%，或血 < 50% 且被两只以上围 → 后退脱离
 strat_retreat = true
@@ -529,6 +660,66 @@ mod tests {
         assert!(!c.channels.attack);
         // 未提及的保持默认
         assert!(c.channels.look);
+    }
+
+    #[test]
+    fn every_gather_key_is_parsed() {
+        // 键名写错/漏解析在这套自制 parser 里是**静默失败**（用默认值），
+        // 所以逐个改成一个明显不同的值再读回来。少一个键这条就会挂。
+        let c = Config::from_str(
+            "gather = true
+             gather_min_hp = 0.5
+             gather_min_food = 3
+             gather_night = true
+             gather_quota = 4
+             gather_rest_ms = 5000
+             gather_enter_ms = 1000
+             gather_cooldown_ms = 2000
+             gather_scan_every_ms = 800
+             gather_scan_ms = 100
+             gather_reach = 3.5
+             gather_max_walk = 9
+             gather_max_chop_ms = 12000
+",
+        );
+        assert!(c.gather.enabled);
+        assert!((c.gather.min_hp - 0.5).abs() < 1e-6);
+        assert_eq!(c.gather.min_food, 3);
+        assert!(c.gather.allow_night);
+        assert_eq!(c.gather.quota, 4);
+        assert_eq!(c.gather.rest_ms, 5_000);
+        assert_eq!(c.gather.enter_ms, 1_000);
+        assert_eq!(c.gather.cooldown_ms, 2_000);
+        assert_eq!(c.gather.scan_every_ms, 800);
+        assert_eq!(c.gather.scan_ms, 100);
+        assert!((c.gather.reach - 3.5).abs() < 1e-6);
+        assert!((c.gather.max_walk - 9.0).abs() < 1e-6);
+        assert_eq!(c.gather.max_chop_ms, 12_000);
+    }
+
+    #[test]
+    fn gather_reach_cannot_go_below_the_near_probe_tier() {
+        // 数据包最近档就是 3 格。reach 设到 3 以下，`d = 3.0 > reach` 永远成立，
+        // 角色会一路走到树里也进不了"砍"的状态。夹到 3.0 起步。
+        let c = Config::from_str("gather_reach = 1.2");
+        assert!(
+            c.gather.reach >= 3.0,
+            "reach 低于最近探测档，就永远判定还没到，实际值 {}",
+            c.gather.reach
+        );
+    }
+
+    #[test]
+    fn shipped_toml_matches_gather_defaults() {
+        // 文档和实现脱节过一次（help 列了 init 但没实现），这里锁住。
+        let shipped = Config::from_str(DEFAULT_TOML).gather;
+        let builtin = GatherCfg::default();
+        assert_eq!(shipped.enabled, builtin.enabled);
+        assert_eq!(shipped.min_food, builtin.min_food);
+        assert_eq!(shipped.allow_night, builtin.allow_night);
+        assert_eq!(shipped.quota, builtin.quota);
+        assert_eq!(shipped.enter_ms, builtin.enter_ms);
+        assert_eq!(shipped.cooldown_ms, builtin.cooldown_ms);
     }
 
     #[test]

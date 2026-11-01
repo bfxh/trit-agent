@@ -68,6 +68,8 @@ pub struct Agent {
     pub input: Box<dyn Input>,
     pub tail: Option<LogTail>,
     pub sensor: Option<Sensor>,
+    /// 最后一次收到传感器数据的时间。用来判断「这条消息有多旧」。
+    pub sensor_at: u64,
 
     /* 感知状态 */
     pub hp: Option<f32>,
@@ -86,6 +88,8 @@ pub struct Agent {
     /* 战法与共同意识 */
     pub strat: StratState,
     pub squad: Squad,
+    /// 采集门控（砍树）。判据全在 [`crate::gather`]，这里只持有状态。
+    pub gather: crate::gather::Gather,
     /// `squad_control = dry` 时的落地通道
     dry_cmd: DrySink,
     /* 卡住检测：累计路程窗口 */
@@ -107,6 +111,9 @@ pub struct Agent {
     // 一次按下至少要持续这么久才松开。游戏输入按帧采样（~16ms），
     // 5ms 的按键脉冲有很大概率整帧漏掉，表现就是「AI 不攻击」。
     btn_left_until: u64,
+    /// 上一拍决策是不是要求「按住」左键（砍树）。用来区分松手时机：
+    /// 脉冲靠超时松，按住靠决策撤回松。
+    btn_left_hold: bool,
     btn_right_until: u64,
     space_until: u64,
     respawn_clicks: u32,
@@ -162,6 +169,7 @@ impl Agent {
             input,
             tail: None,
             sensor: None,
+            sensor_at: 0,
             hp: None,
             threat: Tri::Zero,
             threat_until: 0,
@@ -172,6 +180,7 @@ impl Agent {
             hostiles: None,
             strat: StratState::new(),
             squad: Squad::new(cfg.squad),
+            gather: crate::gather::Gather::new(),
             dry_cmd: DrySink::default(),
             pos_last: None,
             pos_win_start: 0,
@@ -186,6 +195,7 @@ impl Agent {
             btn_left: false,
             btn_right: false,
             btn_left_until: 0,
+            btn_left_hold: false,
             btn_right_until: 0,
             space_until: 0,
             respawn_clicks: 0,
@@ -364,6 +374,7 @@ impl Agent {
         self.key_space = false;
         self.key_shift = false;
         self.btn_left = false;
+        self.btn_left_hold = false;
         self.btn_right = false;
     }
 
@@ -461,6 +472,7 @@ impl Agent {
                     self.respawn_clicks = 0;
                 }
                 self.track_motion(s.x, s.y, s.z, now_ms);
+                self.sensor_at = now_ms;
                 self.sensor = Some(s);
             }
             LogEvent::HealthProbe(h) => {
@@ -566,13 +578,14 @@ impl Agent {
                 self.tactics_line()
             }
             "status" => format!(
-                "{} phase={} hp={} {} {} {}",
+                "{} phase={} hp={} {} {} {} {}",
                 if self.armed { "armed" } else { "off" },
                 self.machine.phase.name(),
                 self.hp.map(|h| format!("{h:.1}")).unwrap_or("?".into()),
                 self.tactics_line(),
                 self.strategy_line(),
-                self.squad.line(self.cfg.squad_control.as_str())
+                self.squad.line(self.cfg.squad_control.as_str()),
+                self.gather.line()
             ),
             "squad" => match arg.as_str() {
                 "" => self.squad.line(self.cfg.squad_control.as_str()),
@@ -629,7 +642,40 @@ impl Agent {
                     self.strategy_line()
                 }
             },
-            _ => "? !ai !mode !tac !strat !squad !attack !move !look !jump !use !threat !calm !status".to_string(),
+            "gather" => match arg.as_str() {
+                "" => self.gather.line(),
+                "on" | "1" => {
+                    self.cfg.gather.enabled = true;
+                    format!("gather on ({})", self.gather.line())
+                }
+                "off" | "0" => {
+                    self.cfg.gather.enabled = false;
+                    self.gather.reset();
+                    "gather off".to_string()
+                }
+                // 清配额和冷却：卡住了不想等 30 秒就敲这个
+                "reset" => {
+                    self.gather.reset();
+                    "gather reset".to_string()
+                }
+                "night" => {
+                    self.cfg.gather.allow_night = !self.cfg.gather.allow_night;
+                    format!(
+                        "gather night {}",
+                        if self.cfg.gather.allow_night { "on" } else { "off" }
+                    )
+                }
+                other => {
+                    if let Ok(v) = other.parse::<u32>() {
+                        self.cfg.gather.quota = v.min(1_000);
+                        format!("gather quota {}", self.cfg.gather.quota)
+                    } else {
+                        "? !gather on|off|reset|night|<配额>".to_string()
+                    }
+                }
+            },
+            _ => "? !ai !mode !tac !strat !squad !gather !attack !move !look !jump !use !threat !calm !status"
+                .to_string(),
         };
         reply
     }
@@ -670,6 +716,16 @@ impl Agent {
         // 数据包只报「最近爆炸源」一档，统一按苦力怕的 10 格判据处理：
         // TNT 引信 4 秒、爆炸半径 7 格，10 格起跑更保守。
         let hazard = crate::npc::hazard_band(crate::npc::tier_to_dist(self.hazard_tier), None);
+        // 传感器是有新鲜度的：数据包每秒报一次，停更 3 秒说明游戏那边
+        // 出问题了（卡死 / 关掉了 / 退出世界）。这时候宁可让「木头位置」变成
+        // 未知，也不能拿旧坐标一路砍 —— 会对着空气挥 20 秒。
+        let fresh = |now_ms: u64| -> Option<&Sensor> {
+            self.sensor
+                .as_ref()
+                .filter(|_| now_ms.saturating_sub(self.sensor_at) < 3_000)
+        };
+        let sn = fresh(now_ms);
+
         WorldView {
             hp: self.hp.map(|h| (h / 20.0).clamp(0.0, 1.0)),
             threat: self.threat,
@@ -677,6 +733,11 @@ impl Agent {
             dist,
             hazard,
             enemies: self.hostiles,
+            food: sn.map(|s| s.food),
+            wood: sn.and_then(|s| crate::gather::wood_dist(s.wood_tier)),
+            wood_dir: sn.map(|s| s.wood_dir),
+            night: sn.and_then(|s| s.is_night()),
+            pitch: sn.map(|s| s.pitch),
             stuck: self.stuck,
             pos: self.pos_last,
             dead: self.dead,
@@ -706,11 +767,16 @@ impl Agent {
         }
         // 先 peek 出本周期阶段，行为模块据此投票；再由 step 用同一输入重算
         let phase_now = self.machine.peek(&w);
+        // 采集门控先跑：行为层只负责"手怎么动"，"该不该动手"在这里定。
+        // 注意即使不在 Idle 也照跑 —— 交战期间正是该累积冷却的时候，
+        // 不然打完架立刻回去砍，等于没被打断过。
+        let gmode = self.gather.tick(&w, &self.cfg.gather, now_ms);
         let ctx = Ctx {
             w,
             phase: phase_now,
             now_ms,
             dt_ms,
+            gather: gmode,
         };
 
         // 共同意识先跑：让从属实体跟上同一份判断。
@@ -861,16 +927,25 @@ impl Agent {
                 self.input.mouse_move(0, dy);
             }
         }
-        // 左键：按下后至少按住 MIN_CLICK_MS，保证跨过一帧
+        // 左键。两种节奏，靠 decision 区分：
+        // - 脉冲（打怪）：按下后至少按住 MIN_CLICK_MS，保证跨过一帧采样；
+        // - 按住（砍方块）：一直按着，直到决策自己撤回 —— 挖矿进度是连续的，
+        //   松手就归零，脉冲式永远砍不断。
         if d.dirs[Channel::Attack.index()] == Tri::Pos {
             if !self.btn_left {
                 self.btn_left = true;
                 self.input.button(Button::Left, true);
             }
+            self.btn_left_hold = d.attack_hold;
             self.btn_left_until = now_ms + MIN_CLICK_MS;
-        } else if self.btn_left && now_ms >= self.btn_left_until {
-            self.btn_left = false;
-            self.input.button(Button::Left, false);
+        } else if self.btn_left {
+            // 按住模式一看到决策不再要攻击，立刻松 —— 不能等超时，
+            // 否则扫视那 350ms 里还在白砍。
+            if self.btn_left_hold || now_ms >= self.btn_left_until {
+                self.btn_left = false;
+                self.btn_left_hold = false;
+                self.input.button(Button::Left, false);
+            }
         }
         // 右键
         if d.dirs[Channel::Use.index()] == Tri::Pos {
@@ -1117,7 +1192,24 @@ mod tests {
             hostiles,
             dist_tier: if hostiles > 0 { d } else { 0 },
             hazard_tier: c,
+            wood_tier: 0,
+            wood_dir: 0,
+            tod: 8_000,
+            pitch: 0.0,
         })
+    }
+
+    /// 指定「附近有没有木头」的传感器事件。`tier` 用数据包的档位：0/3/6/12。
+    fn sens_wood(hp: f32, tier: i32, dir: i32, tod: i32) -> LogEvent {
+        match sens(hp, 0, 0) {
+            LogEvent::Sensor(mut s) => {
+                s.wood_tier = tier;
+                s.wood_dir = dir;
+                s.tod = tod;
+                LogEvent::Sensor(s)
+            }
+            other => other,
+        }
     }
     use crate::act::dry::DryInput;
 
@@ -1203,6 +1295,168 @@ mod tests {
         assert!(!a.key_w, "中距离应站住不前进");
         a.ingest(sens_at(20.0, 1, 6, 0.0, 0.0, 0), 1_000);
         assert!(!a.world(2, 1_000).stuck, "没按前后键就不该判卡住");
+    }
+
+    // ---------------------------------------------------------------- 采集
+
+    /// 开好采集的 agent。默认 `mode = hold`：不巡逻，免得跟采集抢前进票。
+    fn forager() -> Agent {
+        let cfg = Config::from_str("hz = 200
+gather = true
+mode = hold
+");
+        let mut a = Agent::new(cfg, Box::new(DryInput::new()));
+        a.arm(true);
+        a
+    }
+
+    /// 推进一段时间，每 500ms 补一次传感器（真实数据包是 1 秒一报，
+    /// 而 `world()` 会把超过 3 秒的数据当过期）。
+    ///
+    /// `wood` 是这一段时间内传感器报的木头档位：0 = 视野内没有。
+    fn pump(a: &mut Agent, from: u64, to: u64, wood: i32) -> Decision {
+        let mut t = from;
+        let mut d = a.step(t, 5);
+        while t < to {
+            if t % 500 == 0 {
+                a.ingest(sens_wood(20.0, wood, 0, 8_000), t);
+            }
+            t += 50;
+            d = a.step(t, 5);
+        }
+        d
+    }
+
+    #[test]
+    fn gather_holds_left_button_while_chopping() {
+        let mut a = forager();
+        // 木头 3 格内 = 直接开砍（reach 默认 3.2）
+        let d = pump(&mut a, 0, 4_000, 3);
+        assert_eq!(a.gather.mode, crate::gather::Mode::Chop, "why={:?}", a.gather.why);
+        assert_eq!(d.dirs[Channel::Attack.index()], Tri::Pos);
+        assert!(d.attack_hold, "砍方块必须按住，脉冲式永远砍不断");
+        assert!(a.btn_left && a.btn_left_hold);
+    }
+
+    #[test]
+    fn gather_walks_to_a_tree_that_is_farther() {
+        let mut a = forager();
+        pump(&mut a, 0, 4_000, 6);
+        assert_eq!(a.gather.mode, crate::gather::Mode::Approach);
+        assert!(a.key_w, "6 格就该往那边走");
+        assert!(!a.btn_left, "还没到就砍是白挥");
+    }
+
+    #[test]
+    fn threat_makes_it_drop_everything_mid_chop() {
+        let mut a = forager();
+        pump(&mut a, 0, 4_000, 3);
+        assert!(a.btn_left, "前提：已经在砍了");
+
+        // 突然冒怪
+        a.ingest(sens_at(20.0, 2, 6, 0.0, 0.0, 0), 4_000);
+        let d = a.step(4_050, 5);
+        assert_eq!(d.phase, Phase::Engage);
+        // 注意不能断言 `!btn_left`：交战那一拍 Combat 会自己投攻击票（打怪）。
+        // 要断言的是"不再以按住模式按着" —— 砍树的持续按住必须停。
+        assert!(!a.btn_left_hold, "交战了还按着左键砍树就是白挨打");
+        assert!(!d.attack_hold);
+        assert_eq!(a.gather.mode, crate::gather::Mode::Cooldown);
+        assert_eq!(a.gather.interrupted_by, crate::gather::Why::Threat);
+    }
+
+    #[test]
+    fn cooldown_survives_the_enemy_leaving() {
+        // 怪物走掉之后不能立刻回去砍 —— 这正是"原地抽搐"的根源
+        let mut a = forager();
+        pump(&mut a, 0, 4_000, 3);
+        a.ingest(sens_at(20.0, 2, 6, 0.0, 0.0, 0), 4_000);
+        a.step(4_050, 5);
+
+        // 怪没了，但冷却还没过
+        pump(&mut a, 4_100, 8_000, 3);
+        assert_eq!(a.gather.mode, crate::gather::Mode::Cooldown);
+        assert!(!a.btn_left_hold, "冷却期间不许按住左键");
+
+        // 冷却过了才回去砍
+        pump(&mut a, 8_100, 20_000, 3);
+        assert_eq!(a.gather.mode, crate::gather::Mode::Chop, "why={:?}", a.gather.why);
+    }
+
+    #[test]
+    fn night_blocks_gathering() {
+        let cfg = Config::from_str("gather = true
+");
+        assert!(!cfg.gather.allow_night, "默认夜里不砍");
+
+        let cfg = Config::from_str("hz = 200
+gather = true
+mode = hold
+");
+        let mut a = Agent::new(cfg, Box::new(DryInput::new()));
+        a.arm(true);
+        let mut t = 0;
+        while t < 4_000 {
+            a.ingest(sens_wood(20.0, 3, 0, 16_000), t); // 夜里
+            a.step(t, 5);
+            t += 50;
+        }
+        assert_eq!(a.gather.why, crate::gather::Why::Night);
+        assert!(!a.btn_left);
+    }
+
+    #[test]
+    fn no_sensor_means_no_gathering() {
+        // 没装数据包 → 不知道有没有木头、也不知道是不是安全 → 一律不采
+        let mut a = forager();
+        for t in (0..4_000).step_by(50) {
+            a.step(t, 5);
+        }
+        // 威胁状态从头到尾是未知（Zero），门控给出的就是"不确定"
+        assert_ne!(a.gather.gate, Tri::Pos);
+        assert!(!a.btn_left_hold);
+    }
+
+    #[test]
+    fn stale_sensor_stops_gathering() {
+        // 数据包停更（退世界 / 游戏卡死）后不能拿旧位置一路砍
+        let mut a = forager();
+        pump(&mut a, 0, 4_000, 3);
+        assert!(a.btn_left);
+        // 4 秒不再上报 → 超过 3 秒新鲜度
+        for t in (4_100..9_000).step_by(50) {
+            a.step(t, 5);
+        }
+        assert!(!a.btn_left_hold, "传感器过期了还在砍 = 对着空气挥");
+        // 过期后木头位置和威胁状态都变成未知，两个理由都该拦住它
+        assert!(
+            matches!(
+                a.gather.why,
+                crate::gather::Why::NoWood | crate::gather::Why::ThreatUnknown
+            ),
+            "{:?}",
+            a.gather.why
+        );
+    }
+
+    #[test]
+    fn gather_off_by_default() {
+        let a = Agent::new(Config::default(), Box::new(DryInput::new()));
+        assert!(!a.cfg.gather.enabled, "采集会砍掉用户的树，默认必须关");
+    }
+
+    #[test]
+    fn gather_command_toggles_and_reports() {
+        let mut a = forager();
+        assert!(a.command("gather", 0).contains("gather="));
+        assert!(a.command("gather off", 0).contains("off"));
+        assert!(!a.cfg.gather.enabled);
+        assert!(a.command("gather on", 0).contains("on"));
+        assert!(a.cfg.gather.enabled);
+        assert!(a.command("gather 8", 0).contains("quota 8"));
+        assert_eq!(a.cfg.gather.quota, 8);
+        assert!(a.command("gather night", 0).contains("night on"));
+        assert!(a.cfg.gather.allow_night);
     }
 
     #[test]

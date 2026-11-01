@@ -2,3 +2,7 @@
 scoreboard objectives add trit_bridge dummy
 scoreboard players set on trit_bridge 0
 scoreboard players set t trit_bridge 0
+scoreboard players set wdt trit_bridge 0
+scoreboard players set wdr trit_bridge 0
+scoreboard players set tod trit_bridge 0
+scoreboard players set pit trit_bridge 0

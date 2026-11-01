@@ -98,6 +98,11 @@ pub struct Vote {
     /// 权重，>0。权重用来表达「这条意见有多重要」，而不是「有多确定」。
     pub weight: i32,
     pub src: &'static str,
+    /// 要求**按住**这个通道，而不是点一下。
+    ///
+    /// 只有 `Attack` 用得上：打怪要脉冲（20 TPS 的帧采样会漏掉太短的按下），
+    /// 砍树要一直按住 —— 松手就白砍了。
+    pub hold: bool,
 }
 
 impl Vote {
@@ -107,6 +112,17 @@ impl Vote {
             dir,
             weight: weight.max(0),
             src,
+            hold: false,
+        }
+    }
+    /// 按住不放的票。裁决结果仍然是 `Pos`，只是执行层不松手。
+    pub fn hold(channel: Channel, weight: i32, src: &'static str) -> Vote {
+        Vote {
+            channel,
+            dir: Tri::Pos,
+            weight: weight.max(0),
+            src,
+            hold: true,
         }
     }
     pub fn abstain(channel: Channel, weight: i32, src: &'static str) -> Vote {
@@ -136,6 +152,25 @@ pub struct WorldView {
     /// 「兵贵神速」要单敌（1 只才敢突），「围点打援」要多敌（3 只以上才值得绕侧）。
     /// 只知道最近距离的话，这两种局在数据上长得一模一样。
     pub enemies: Option<u32>,
+    /// 饱食度 0..=20。None = 未知。
+    ///
+    /// 采集要用它：饿着砍树是最亏的 —— 砍完跑不动，而且不能自然回血。
+    pub food: Option<i32>,
+    /// 最近原木的距离（格）。**None = 视野内没有**，不是「未知」。
+    ///
+    /// 数据包用 8 个方向 × 3 档距离做射线判定，全部没命中就是 `None`。
+    /// 这个字段只在 ±45° 的 8 个方位上有分辨率，够用来"朝那边走"，
+    /// 不够用来精确瞄准 —— 走过去之后距离会更新，闭环修正。
+    pub wood: Option<f32>,
+    /// 木头相对当前朝向的方位：`0` 正前，负左正右，单位 45°（范围 -3..=3）。
+    pub wood_dir: Option<i32>,
+    /// 是否夜晚。None = 不知道游戏内时间。
+    pub night: Option<bool>,
+    /// 视线俯仰角（度，负=下看）。None = 没读到。
+    ///
+    /// 只给方向的通道 + 这个坐标 = 闭环。砍树时 AI 才能"把眼睛压到树干上"，
+    /// 而不是每拍投一次 `Pos` 一路转到脚面。
+    pub pitch: Option<f32>,
     /// 是否卡住（位移长时间为 0）
     pub stuck: bool,
     /// 当前坐标（x, y, z）。None = 还没读到过。
@@ -178,6 +213,12 @@ pub struct Decision {
     pub phase: Phase,
     /// 需要点一次重生按钮
     pub recover_click: bool,
+    /// 左键要**一直按住**（砍树 / 挖矿），而不是点一下。
+    ///
+    /// 单独一个字段而不是塞进 `dirs`：`dirs` 是三值的"方向"，
+    /// "按住"是执行层的时序问题，两者正交 —— 打怪是 Pos + 点一下，
+    /// 砍树是 Pos + 按住，方向一样。
+    pub attack_hold: bool,
     /// 本帧的阶段判定理由，便于回放排查
     pub reason: Reason,
 }
@@ -348,10 +389,19 @@ impl Machine {
         }
 
         self.phase = phase;
+        // 「按住」只看**本拍实际投票**，不看裁决后的 dirs。
+        // 裁决器有迟滞，本拍没人投 Pos 时 dirs 可能停在上一拍的 Pos 上；
+        // 如果照着 dirs 算 hold，扫视期间就会一直按住左键不放。
+        let attack_hold = gate
+            && dirs[Channel::Attack.index()] == Tri::Pos
+            && used_votes
+                .iter()
+                .any(|v| v.channel == Channel::Attack && v.dir == Tri::Pos && v.hold);
         Decision {
             dirs,
             phase,
             recover_click,
+            attack_hold,
             reason,
         }
     }

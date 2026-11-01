@@ -19,4 +19,89 @@ execute if entity @e[type=#trit_bridge:explosives,limit=1,distance=..16] run sco
 execute if entity @e[type=#trit_bridge:explosives,limit=1,distance=..10] run scoreboard players set xst trit_bridge 10
 execute if entity @e[type=#trit_bridge:explosives,limit=1,distance=..6] run scoreboard players set xst trit_bridge 6
 execute if entity @e[type=#trit_bridge:explosives,limit=1,distance=..3] run scoreboard players set xst trit_bridge 3
-tellraw @s [{"text":"<TRIT hp="},{"score":{"name":"hp","objective":"trit_bridge"}},{"text":" food="},{"score":{"name":"food","objective":"trit_bridge"}},{"text":" x="},{"score":{"name":"px","objective":"trit_bridge"}},{"text":" y="},{"score":{"name":"py","objective":"trit_bridge"}},{"text":" z="},{"score":{"name":"pz","objective":"trit_bridge"}},{"text":" h="},{"score":{"name":"hst","objective":"trit_bridge"}},{"text":" d="},{"score":{"name":"dst","objective":"trit_bridge"}},{"text":" c="},{"score":{"name":"xst","objective":"trit_bridge"}},{"text":">"}]
+# 原木：8 方向 × 3 档，由远到近、正前最后，留下最近那一格
+scoreboard players set wdt trit_bridge 0
+scoreboard players set wdr trit_bridge 0
+execute store result score tod trit_bridge run time query daytime
+execute store result score pit trit_bridge run data get entity @s Rotation[1] 10
+execute at @s rotated ~-135 0 if block ^ ^ ^12 #minecraft:logs run scoreboard players set wdt trit_bridge 12
+execute at @s rotated ~-135 0 if block ^ ^ ^12 #minecraft:logs run scoreboard players set wdr trit_bridge -3
+execute at @s rotated ~-90 0 if block ^ ^ ^12 #minecraft:logs run scoreboard players set wdt trit_bridge 12
+execute at @s rotated ~-90 0 if block ^ ^ ^12 #minecraft:logs run scoreboard players set wdr trit_bridge -2
+execute at @s rotated ~-45 0 if block ^ ^ ^12 #minecraft:logs run scoreboard players set wdt trit_bridge 12
+execute at @s rotated ~-45 0 if block ^ ^ ^12 #minecraft:logs run scoreboard players set wdr trit_bridge -1
+execute at @s rotated ~45 0 if block ^ ^ ^12 #minecraft:logs run scoreboard players set wdt trit_bridge 12
+execute at @s rotated ~45 0 if block ^ ^ ^12 #minecraft:logs run scoreboard players set wdr trit_bridge 1
+execute at @s rotated ~90 0 if block ^ ^ ^12 #minecraft:logs run scoreboard players set wdt trit_bridge 12
+execute at @s rotated ~90 0 if block ^ ^ ^12 #minecraft:logs run scoreboard players set wdr trit_bridge 2
+execute at @s rotated ~135 0 if block ^ ^ ^12 #minecraft:logs run scoreboard players set wdt trit_bridge 12
+execute at @s rotated ~135 0 if block ^ ^ ^12 #minecraft:logs run scoreboard players set wdr trit_bridge 3
+execute at @s rotated ~180 0 if block ^ ^ ^12 #minecraft:logs run scoreboard players set wdt trit_bridge 12
+execute at @s rotated ~180 0 if block ^ ^ ^12 #minecraft:logs run scoreboard players set wdr trit_bridge 4
+execute at @s rotated ~0 0 if block ^ ^ ^12 #minecraft:logs run scoreboard players set wdt trit_bridge 12
+execute at @s rotated ~0 0 if block ^ ^ ^12 #minecraft:logs run scoreboard players set wdr trit_bridge 0
+execute at @s rotated ~-135 0 if block ^ ^ ^6 #minecraft:logs run scoreboard players set wdt trit_bridge 6
+execute at @s rotated ~-135 0 if block ^ ^ ^6 #minecraft:logs run scoreboard players set wdr trit_bridge -3
+execute at @s rotated ~-90 0 if block ^ ^ ^6 #minecraft:logs run scoreboard players set wdt trit_bridge 6
+execute at @s rotated ~-90 0 if block ^ ^ ^6 #minecraft:logs run scoreboard players set wdr trit_bridge -2
+execute at @s rotated ~-45 0 if block ^ ^ ^6 #minecraft:logs run scoreboard players set wdt trit_bridge 6
+execute at @s rotated ~-45 0 if block ^ ^ ^6 #minecraft:logs run scoreboard players set wdr trit_bridge -1
+execute at @s rotated ~45 0 if block ^ ^ ^6 #minecraft:logs run scoreboard players set wdt trit_bridge 6
+execute at @s rotated ~45 0 if block ^ ^ ^6 #minecraft:logs run scoreboard players set wdr trit_bridge 1
+execute at @s rotated ~90 0 if block ^ ^ ^6 #minecraft:logs run scoreboard players set wdt trit_bridge 6
+execute at @s rotated ~90 0 if block ^ ^ ^6 #minecraft:logs run scoreboard players set wdr trit_bridge 2
+execute at @s rotated ~135 0 if block ^ ^ ^6 #minecraft:logs run scoreboard players set wdt trit_bridge 6
+execute at @s rotated ~135 0 if block ^ ^ ^6 #minecraft:logs run scoreboard players set wdr trit_bridge 3
+execute at @s rotated ~180 0 if block ^ ^ ^6 #minecraft:logs run scoreboard players set wdt trit_bridge 6
+execute at @s rotated ~180 0 if block ^ ^ ^6 #minecraft:logs run scoreboard players set wdr trit_bridge 4
+execute at @s rotated ~0 0 if block ^ ^ ^6 #minecraft:logs run scoreboard players set wdt trit_bridge 6
+execute at @s rotated ~0 0 if block ^ ^ ^6 #minecraft:logs run scoreboard players set wdr trit_bridge 0
+execute at @s rotated ~-135 -45 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdt trit_bridge 3
+execute at @s rotated ~-135 -45 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdr trit_bridge -3
+execute at @s rotated ~-90 -45 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdt trit_bridge 3
+execute at @s rotated ~-90 -45 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdr trit_bridge -2
+execute at @s rotated ~-45 -45 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdt trit_bridge 3
+execute at @s rotated ~-45 -45 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdr trit_bridge -1
+execute at @s rotated ~45 -45 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdt trit_bridge 3
+execute at @s rotated ~45 -45 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdr trit_bridge 1
+execute at @s rotated ~90 -45 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdt trit_bridge 3
+execute at @s rotated ~90 -45 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdr trit_bridge 2
+execute at @s rotated ~135 -45 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdt trit_bridge 3
+execute at @s rotated ~135 -45 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdr trit_bridge 3
+execute at @s rotated ~180 -45 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdt trit_bridge 3
+execute at @s rotated ~180 -45 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdr trit_bridge 4
+execute at @s rotated ~0 -45 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdt trit_bridge 3
+execute at @s rotated ~0 -45 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdr trit_bridge 0
+execute at @s rotated ~-135 0 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdt trit_bridge 3
+execute at @s rotated ~-135 0 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdr trit_bridge -3
+execute at @s rotated ~-90 0 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdt trit_bridge 3
+execute at @s rotated ~-90 0 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdr trit_bridge -2
+execute at @s rotated ~-45 0 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdt trit_bridge 3
+execute at @s rotated ~-45 0 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdr trit_bridge -1
+execute at @s rotated ~45 0 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdt trit_bridge 3
+execute at @s rotated ~45 0 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdr trit_bridge 1
+execute at @s rotated ~90 0 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdt trit_bridge 3
+execute at @s rotated ~90 0 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdr trit_bridge 2
+execute at @s rotated ~135 0 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdt trit_bridge 3
+execute at @s rotated ~135 0 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdr trit_bridge 3
+execute at @s rotated ~180 0 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdt trit_bridge 3
+execute at @s rotated ~180 0 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdr trit_bridge 4
+execute at @s rotated ~0 0 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdt trit_bridge 3
+execute at @s rotated ~0 0 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdr trit_bridge 0
+execute at @s rotated ~-135 30 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdt trit_bridge 3
+execute at @s rotated ~-135 30 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdr trit_bridge -3
+execute at @s rotated ~-90 30 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdt trit_bridge 3
+execute at @s rotated ~-90 30 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdr trit_bridge -2
+execute at @s rotated ~-45 30 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdt trit_bridge 3
+execute at @s rotated ~-45 30 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdr trit_bridge -1
+execute at @s rotated ~45 30 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdt trit_bridge 3
+execute at @s rotated ~45 30 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdr trit_bridge 1
+execute at @s rotated ~90 30 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdt trit_bridge 3
+execute at @s rotated ~90 30 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdr trit_bridge 2
+execute at @s rotated ~135 30 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdt trit_bridge 3
+execute at @s rotated ~135 30 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdr trit_bridge 3
+execute at @s rotated ~180 30 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdt trit_bridge 3
+execute at @s rotated ~180 30 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdr trit_bridge 4
+execute at @s rotated ~0 30 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdt trit_bridge 3
+execute at @s rotated ~0 30 if block ^ ^ ^3 #minecraft:logs run scoreboard players set wdr trit_bridge 0
+tellraw @s [{"text":"<TRIT hp="},{"score":{"name":"hp","objective":"trit_bridge"}},{"text":" food="},{"score":{"name":"food","objective":"trit_bridge"}},{"text":" x="},{"score":{"name":"px","objective":"trit_bridge"}},{"text":" y="},{"score":{"name":"py","objective":"trit_bridge"}},{"text":" z="},{"score":{"name":"pz","objective":"trit_bridge"}},{"text":" h="},{"score":{"name":"hst","objective":"trit_bridge"}},{"text":" d="},{"score":{"name":"dst","objective":"trit_bridge"}},{"text":" c="},{"score":{"name":"xst","objective":"trit_bridge"}},{"text":" w="},{"score":{"name":"wdt","objective":"trit_bridge"}},{"text":" wd="},{"score":{"name":"wdr","objective":"trit_bridge"}},{"text":" t="},{"score":{"name":"tod","objective":"trit_bridge"}},{"text":" p="},{"score":{"name":"pit","objective":"trit_bridge"}},{"text":">"}]

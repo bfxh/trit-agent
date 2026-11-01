@@ -7,6 +7,9 @@
 //! - [`strategy`]：战法层，只调票的权重，不新增行为
 //! - [`squad`]：共同意识，一个决策核心控多个身体
 //! - [`npc`]：从 mob mod 的 AI Goal 反编译提炼的三值战术判据
+//! - [`strategy`]：孙子兵法式的上层战法，只加权不新增行为
+//! - [`squad`]：共同意识，一个大脑控多个身体
+//! - [`gather`]：采集门控 —— 重点不是"怎么砍"，是"什么时候不砍"
 //! - [`perceive`]：日志感知
 //! - [`act`]：输入注入
 //! - [`agent`]：把三层接起来跑高频循环
@@ -16,6 +19,7 @@ pub mod agent;
 pub mod behaviors;
 pub mod config;
 pub mod fsm;
+pub mod gather;
 pub mod npc;
 pub mod perceive;
 pub mod squad;

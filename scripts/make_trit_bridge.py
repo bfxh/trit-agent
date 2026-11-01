@@ -29,6 +29,24 @@ EXPLOSIVES = ["creeper", "tnt", "end_crystal", "fireball", "small_fireball", "wi
 # 从远到近依次覆盖，最后留下的就是最近那一档。外部按档位下界使用。
 DIST_TIERS = [32, 16, 10, 6, 3]
 
+# ---- 原木探测 ----
+# 沿「当前朝向 ±45° 的 8 个方向」打水平射线。`rotated ~DEG 0` 保留玩家 yaw、
+# 把 pitch 压平 —— 玩家低头砍树时射线也不会打到脚面上。
+#
+# 顺序有讲究：距离由远到近、方向里「正前」放最后。每条命中都覆盖前一条，
+# 于是最后留下的是「最近的、且尽量正前」那一格。
+WOOD_DIRS = [(-135, -3), (-90, -2), (-45, -1), (45, 1), (90, 2), (135, 3), (180, 4), (0, 0)]
+WOOD_TIERS = [12, 6, 3]
+# 近档（3 格）额外扫三个俯仰角，覆盖树干的下 / 中 / 上。
+# 玩家砍树时眼高那格一被砍掉，水平射线就再也命中不了树干 ——
+# 只打一条水平射线的话，AI 会以为"树没了"，其实还有五六格。
+WOOD_NEAR_TIER = 3
+WOOD_NEAR_PITCH = [-45, 0, 30]
+
+# 方块判据。原版 `minecraft:logs` 已经覆盖所有原木 / 木头 / 去皮木，
+# 换别的资源（比如 `#forge:ores`）只改这一行。
+WOOD_BLOCK = "#minecraft:logs"
+
 
 def write(rel: str, text: str) -> None:
     p = BRIDGE / rel
@@ -86,6 +104,26 @@ def sense_function() -> str:
             f"execute if entity @e[type=#trit_bridge:explosives,limit=1,distance=..{t}] "
             f"run scoreboard players set xst trit_bridge {t}"
         )
+
+    # ---- 原木 ----
+    lines.append("# 原木：8 方向 × 3 档，由远到近、正前最后，留下最近那一格")
+    lines.append("scoreboard players set wdt trit_bridge 0")
+    lines.append("scoreboard players set wdr trit_bridge 0")
+    # 游戏内时间，用来判昼夜（13000..23000 算夜里）
+    lines.append("execute store result score tod trit_bridge run time query daytime")
+    # 俯仰角 ×10（-900..900）。有了它 AI 才能把视线精确压到树干高度，
+    # 而不是"往下转一点点"——三值只给方向，没有角度就是开环瞎转。
+    lines.append("execute store result score pit trit_bridge run data get entity @s Rotation[1] 10")
+    for tier in WOOD_TIERS:
+        pitches = WOOD_NEAR_PITCH if tier == WOOD_NEAR_TIER else [0]
+        for pitch in pitches:
+            for deg, wd in WOOD_DIRS:
+                probe = (
+                    f"execute at @s rotated ~{deg} {pitch} "
+                    f"if block ^ ^ ^{tier} {WOOD_BLOCK}"
+                )
+                lines.append(f"{probe} run scoreboard players set wdt trit_bridge {tier}")
+                lines.append(f"{probe} run scoreboard players set wdr trit_bridge {wd}")
     tell = [
         {"text": "<TRIT hp="},
         {"score": {"name": "hp", "objective": "trit_bridge"}},
@@ -103,6 +141,14 @@ def sense_function() -> str:
         {"score": {"name": "dst", "objective": "trit_bridge"}},
         {"text": " c="},
         {"score": {"name": "xst", "objective": "trit_bridge"}},
+        {"text": " w="},
+        {"score": {"name": "wdt", "objective": "trit_bridge"}},
+        {"text": " wd="},
+        {"score": {"name": "wdr", "objective": "trit_bridge"}},
+        {"text": " t="},
+        {"score": {"name": "tod", "objective": "trit_bridge"}},
+        {"text": " p="},
+        {"score": {"name": "pit", "objective": "trit_bridge"}},
         {"text": ">"},
     ]
     lines.append("tellraw @s " + json.dumps(tell, ensure_ascii=False, separators=(",", ":")))
@@ -125,6 +171,10 @@ def main() -> None:
               "scoreboard objectives add trit_bridge dummy",
               "scoreboard players set on trit_bridge 0",
               "scoreboard players set t trit_bridge 0",
+              "scoreboard players set wdt trit_bridge 0",
+              "scoreboard players set wdr trit_bridge 0",
+              "scoreboard players set tod trit_bridge 0",
+              "scoreboard players set pit trit_bridge 0",
               "",
           ]))
 

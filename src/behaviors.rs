@@ -14,6 +14,11 @@ pub struct Ctx {
     pub phase: Phase,
     pub now_ms: u64,
     pub dt_ms: u64,
+    /// 采集门控本拍给出的模式。
+    ///
+    /// 「该不该采」在 [`crate::gather`] 里判完才传进来，行为层只管
+    /// 「手怎么动」—— 这样门控可以独立单测，不用构造一整个 Agent。
+    pub gather: crate::gather::Mode,
 }
 
 pub trait Behavior {
@@ -488,6 +493,140 @@ impl Behavior for Regen {
 }
 
 
+/// 采集：走过去、低头、按住左键，中间抬头看周围。
+///
+/// 这个类本身**不做任何安全判断**。`c.gather` 是 [`crate::gather::Gather`]
+/// 判完之后传进来的结果，这里只负责把那个结论翻译成按键。
+/// 分开的好处是门控能单测（不用造整个 Agent），行为层也保持"只投票"的纯洁性。
+///
+/// 两条容易写错的：
+/// 1. 砍树要 [`Vote::hold`]（按住），不是 `Vote::new(Pos)`（点一下）。
+///    点一下的脉冲只有 70ms，方块挖掘进度会不断归零，永远砍不断。
+/// 2. 扫视时**一条通道都不投**。裁决器里只有"本拍没人投票"才会松手，
+///    投弃权票压不掉上一拍的 `Pos`（迟滞会把它留在那儿）。
+pub struct Forage {
+    yaw_at: u64,
+    yaw_side: Tri,
+    /// 本次俯仰修正推到什么时候
+    pitch_until: u64,
+    /// 下次允许开始新的修正（等数据包把新角度报回来的时间）
+    pitch_next: u64,
+    /// 视角转速（度/秒），用来算"推多久刚好转到位"
+    look_rate: f32,
+}
+
+impl Forage {
+    pub fn new(look_rate: f32) -> Forage {
+        Forage {
+            yaw_at: 0,
+            yaw_side: Tri::Pos,
+            pitch_until: 0,
+            pitch_next: 0,
+            look_rate: look_rate.max(1.0),
+        }
+    }
+
+    /// 俯仰修正：推一下 → 停手等感知 → 再推。
+    ///
+    /// 为什么不每拍都投：数据包 1 秒才报一次角度，而视线默认转 55°/s。
+    /// 一直投 `Pos` 的话，在这 1 秒的"看不见"区间里能转过头 55°，直接从
+    /// 树干冲到脚面甚至天花板，然后下一拍又往回转 —— 振荡，永远对不准。
+    ///
+    /// 所以按「角度差 ÷ 转速」算出这次该推多久，推完就停手，等新读数。
+    fn pitch_vote(&mut self, cur: Option<f32>, want: f32, now: u64) -> Option<Tri> {
+        let dir = crate::gather::aim(cur, want)?;
+        if now < self.pitch_until {
+            return Some(dir); // 还在推，继续
+        }
+        if now < self.pitch_next {
+            return None; // 推完了，等感知刷新，这期间一个字都不投
+        }
+        let deg = (want - cur.unwrap_or(want)).abs();
+        let burst = ((deg / self.look_rate) * 1000.0).clamp(80.0, 400.0) as u64;
+        self.pitch_until = now + burst;
+        // 900ms 是数据包刷新（20 tick）+ 一点余量
+        self.pitch_next = now + burst + 900;
+        Some(dir)
+    }
+}
+
+impl Default for Forage {
+    fn default() -> Self {
+        Forage::new(55.0)
+    }
+}
+
+impl Behavior for Forage {
+    fn name(&self) -> &'static str {
+        "forage"
+    }
+
+    fn vote(&mut self, c: &Ctx) -> Vec<Vote> {
+        // 只在 Idle 阶段采集。交战/撤退时 phase 已经不是 Idle ——
+        // 不需要在这里再写一遍"有威胁就停"，那是重复且容易漏的门控。
+        if c.phase != Phase::Idle {
+            return Vec::new();
+        }
+        let dir = c.w.wood_dir.unwrap_or(0);
+        match c.gather {
+            // 冷却中让位：这时候应该走得越远越好，交给巡逻/撤退
+            crate::gather::Mode::Off | crate::gather::Mode::Cooldown => Vec::new(),
+
+            // 想采但安全窗口还没攒够：**站住等**，别顺手巡逻走开。
+            // 一走开木头就出视野了，等于每 2 秒重新开始。
+            crate::gather::Mode::Wait => {
+                vec![Vote::abstain(Channel::Forward, 5, "forage_hold")]
+            }
+
+            // 插播扫视：停手、抬头、左右看。
+            crate::gather::Mode::Scan => {
+                if c.now_ms >= self.yaw_at {
+                    self.yaw_side = self.yaw_side.not();
+                    self.yaw_at = c.now_ms + 420;
+                }
+                let mut v = vec![Vote::new(Channel::Yaw, self.yaw_side, 4, "forage_scan")];
+                // 砍树时视线是往下的，扫视要抬回来才看得见远处。
+                // 用绝对角闭环，不瞎转 —— 否则扫一次可能一直抬到天花板。
+                if let Some(t) = self.pitch_vote(c.w.pitch, crate::gather::PITCH_SCAN, c.now_ms) {
+                    v.push(Vote::new(Channel::Pitch, t, 3, "forage_lookup"));
+                }
+                v
+            }
+
+            // 走过去。朝向只给方向，转多少由 look_rate 决定（每秒重测，闭环修正）。
+            crate::gather::Mode::Approach => {
+                // 权重 4 > patrol 的 3：采集时走采集的路，不是巡逻的路
+                let mut v = vec![Vote::new(Channel::Forward, Tri::Pos, 4, "forage_walk")];
+                if dir != 0 {
+                    let yaw = if dir < 0 { Tri::Neg } else { Tri::Pos };
+                    v.push(Vote::new(Channel::Yaw, yaw, 4, "forage_turn"));
+                }
+                // 平视：一边走一边低头会撞进水里 / 掉坑里
+                if let Some(t) = self.pitch_vote(c.w.pitch, crate::gather::PITCH_WALK, c.now_ms) {
+                    v.push(Vote::new(Channel::Pitch, t, 1, "forage_level"));
+                }
+                v
+            }
+
+            // 砍。按住左键不放，视线压到树干高度。
+            crate::gather::Mode::Chop => {
+                let mut v = vec![Vote::hold(Channel::Attack, 5, "forage_chop")];
+                // 视线闭环压到树干高度。这一步不做的话，`Pos` 会一路转到脚面，
+                // 准星落在地面上，左键按着也只是在刨土。
+                if let Some(t) = self.pitch_vote(c.w.pitch, crate::gather::PITCH_CHOP, c.now_ms) {
+                    v.push(Vote::new(Channel::Pitch, t, 3, "forage_aim_down"));
+                }
+                // 树干只有 1 格宽，走位会偏，时不时重新对一次
+                if dir != 0 {
+                    let yaw = if dir < 0 { Tri::Neg } else { Tri::Pos };
+                    v.push(Vote::new(Channel::Yaw, yaw, 3, "forage_aim"));
+                }
+                v
+            }
+        }
+    }
+}
+
 // 这些行为都是无参构造，补一个 Default 让 clippy 闭嘴，也方便测试里 `Default::default()`。
 impl Default for Flee {
     fn default() -> Self {
@@ -534,6 +673,8 @@ pub struct Behaviors {
     pub guard: Guard,
     pub breach: Breach,
     pub anchor: Anchor,
+    /// 采集（砍树）。只有在 `c.gather` 说能动手时才投票。
+    pub forage: Forage,
     /// 战术开关：关掉的行为完全不投票，等于回到没有那一档的状态
     tac: Tactics,
 }
@@ -552,6 +693,7 @@ impl Behaviors {
             guard: Guard::new(),
             breach: Breach::new(),
             anchor: Anchor::new(crate::npc::PATROL_RADIUS),
+            forage: Forage::new(cfg.look_rate),
             tac: cfg.tactics,
         }
     }
@@ -576,6 +718,7 @@ impl Behaviors {
         out.extend(self.regen.vote(c));
         out.extend(self.eat.vote(c));
         out.extend(self.anchor.vote(c));
+        out.extend(self.forage.vote(c));
         out.extend(self.patrol.vote(c));
         out.extend(self.scan.vote(c));
         out
@@ -598,7 +741,117 @@ mod tests {
             phase,
             now_ms: now,
             dt_ms: 5,
+            gather: crate::gather::Mode::Off,
         }
+    }
+
+    #[test]
+    fn forage_aims_pitch_in_bursts_not_continuously() {
+        // 数据包 1 秒报一次角度，视线 55°/s。如果每拍都投 Pos，1 秒能转 55°，
+        // 从树干一路冲到脚面。所以要「推一下 → 等感知 → 再推」。
+        let mut f = Forage::new(55.0);
+        let mk = |now: u64, pitch: f32| Ctx {
+            w: WorldView {
+                hp: Some(1.0),
+                threat: Tri::Neg,
+                wood: Some(3.0),
+                wood_dir: Some(0),
+                pitch: Some(pitch),
+                food: Some(18),
+                night: Some(false),
+                ..Default::default()
+            },
+            phase: Phase::Idle,
+            now_ms: now,
+            dt_ms: 5,
+            gather: crate::gather::Mode::Chop,
+        };
+
+        let pitch_of = |f: &mut Forage, c: &Ctx| {
+            f.vote(c)
+                .into_iter()
+                .find(|v| v.channel == Channel::Pitch)
+                .map(|v| v.dir)
+        };
+
+        // 0° → 目标 22°：开推
+        assert_eq!(pitch_of(&mut f, &mk(0, 0.0)), Some(Tri::Pos));
+        // 推的窗口内还在推
+        assert_eq!(pitch_of(&mut f, &mk(200, 0.0)), Some(Tri::Pos));
+        // 推完了（22°/55° ≈ 400ms）：停手等感知，这一拍不该有任何俯仰票
+        assert_eq!(pitch_of(&mut f, &mk(500, 0.0)), None);
+        // 新读数回来了，已经对准 → 还是不动
+        assert_eq!(pitch_of(&mut f, &mk(1_500, 21.0)), None);
+        // 转过头了（44°）→ 往回修
+        assert_eq!(pitch_of(&mut f, &mk(2_600, 44.0)), Some(Tri::Neg));
+    }
+
+    #[test]
+    fn forage_never_holds_attack_while_scanning() {
+        // 扫视时一条攻击票都不能有：裁决器里"本拍没人投票"才松手，
+        // 投弃权票压不掉上一拍的 Pos。
+        let mut f = Forage::new(55.0);
+        let c = Ctx {
+            w: WorldView {
+                hp: Some(1.0),
+                threat: Tri::Neg,
+                wood: Some(3.0),
+                wood_dir: Some(0),
+                pitch: Some(22.0),
+                food: Some(18),
+                night: Some(false),
+                ..Default::default()
+            },
+            phase: Phase::Idle,
+            now_ms: 5_000,
+            dt_ms: 5,
+            gather: crate::gather::Mode::Scan,
+        };
+        let v = f.vote(&c);
+        assert!(v.iter().all(|x| x.channel != Channel::Attack), "{v:?}");
+        assert!(v.iter().all(|x| x.channel != Channel::Forward), "{v:?}");
+    }
+
+    #[test]
+    fn forage_is_silent_when_the_gate_says_no() {
+        let mut f = Forage::new(55.0);
+        for mode in [
+            crate::gather::Mode::Off,
+            crate::gather::Mode::Cooldown,
+        ] {
+            let c = Ctx {
+                w: WorldView {
+                    hp: Some(1.0),
+                    wood: Some(3.0),
+                    ..Default::default()
+                },
+                phase: Phase::Idle,
+                now_ms: 0,
+                dt_ms: 5,
+                gather: mode,
+            };
+            assert!(f.vote(&c).is_empty(), "{mode:?} 不该投票");
+        }
+    }
+
+    #[test]
+    fn forage_waits_instead_of_wandering_off() {
+        // Wait = 想采但还没攒够安全窗口。这时候必须站住，
+        // 不然一顺手巡逻走开，木头就出视野了，每 2 秒从头再来。
+        let mut f = Forage::new(55.0);
+        let c = Ctx {
+            w: WorldView {
+                hp: Some(1.0),
+                wood: Some(3.0),
+                ..Default::default()
+            },
+            phase: Phase::Idle,
+            now_ms: 0,
+            dt_ms: 5,
+            gather: crate::gather::Mode::Wait,
+        };
+        let v = f.vote(&c);
+        assert!(v.iter().any(|x| x.channel == Channel::Forward && x.dir == Tri::Zero));
     }
 
     #[test]
@@ -656,6 +909,7 @@ mod tests {
             },
             phase: Phase::Engage,
             now_ms: 1000,
+            gather: crate::gather::Mode::Off,
             dt_ms: 5,
         }
     }
@@ -803,6 +1057,7 @@ mod tests {
                 phase: Phase::Idle,
                 now_ms: t,
                 dt_ms: 5,
+                gather: crate::gather::Mode::Off,
             };
             let v = b.vote(&c);
             let d = m.step(&c.w, &v, &all);

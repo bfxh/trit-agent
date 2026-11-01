@@ -24,6 +24,7 @@ fn main() {
 
     match cmd {
         "selftest" => selftest(&flags),
+        "sim" if flags.has("gather") => sim_gather(&flags),
         "sim" => sim(&flags),
         "probe" => probe(&flags),
         "run" => run(&flags),
@@ -56,7 +57,8 @@ fn help() {
 
 用法:
   trit-agent selftest [--hz 200] [--secs 2]   逻辑自检 + 高频节拍实测
-  trit-agent sim [--verbose]                  离线场景回放
+  trit-agent sim [--verbose]                  离线场景回放（战斗 / 战法）
+  trit-agent sim --gather                     离线回放「采集门控」：什么时候不该砍
   trit-agent probe [--config path] [--profile <整合包目录>]
   trit-agent run   [--config path] [--seconds N] [--hz N] [--mode hold|patrol|follow]
                    [--profile <整合包目录>] [--window 关键字] [--log path]
@@ -84,6 +86,8 @@ fn help() {
   !tac off             四条移植战术（关掉 = 回到没那一档的原版行为）
   !strat               战法；!strat off 全关，!strat ambush 单独翻
   !squad               共同意识；!squad on|off，!squad recall 手动下令
+  !gather on|off       采集（砍树）；!gather reset 清配额和冷却，!gather 8 设配额
+  !gather night        夜里也砍（默认不砍）
   !threat       !calm       !panic
 
 战法（孙子兵法，一次只生效一条，优先级从高到低）:
@@ -264,6 +268,10 @@ fn high_freq_bench(hz: u32, dur: Duration) -> (u64, Duration) {
             hostiles: 2,
             dist_tier: 3,
             hazard_tier: 0,
+            wood_tier: 0,
+            wood_dir: 0,
+            tod: 8_000,
+            pitch: 0.0,
         }),
         0,
     );
@@ -349,6 +357,11 @@ fn sim(flags: &Flags) {
                     hostiles: scene.2,
                     dist_tier: scene.3,
                     hazard_tier: scene.4,
+                    // 战法演示的场景里没有木头；采集用 `sim gather` 单独演
+                    wood_tier: 0,
+                    wood_dir: 0,
+                    tod: 8_000,
+                    pitch: 0.0,
                 }),
                 t,
             );
@@ -404,6 +417,119 @@ fn sim(flags: &Flags) {
     println!("中间那一段是这次从 mob mod 移植过来的 —— 原版 Goal 只有「靠近」和「开火」，");
     println!("没有「位置刚好」这一档，所以 NPC 会一路挤到你脸上。");
     println!("x 估算位移 {} 格（13 秒）", (mx * 10.0).round() / 10.0);
+}
+
+// ---------------------------------------------------------------- sim --gather
+
+/// 采集演示：把「什么时候不该砍」逐秒演一遍。
+///
+/// 这不是砍树的动画，是**门控的时间线**。每一行都能对上一条判据：
+/// 走过去 → 开砍 → 冒怪收手 → 冷却期内怪走了也不回去 → 掉血停手 → 天黑停手。
+fn sim_gather(flags: &Flags) {
+    let verbose = flags.has("verbose");
+    let cfg = Config::from_str("hz = 200
+gather = true
+mode = hold
+");
+    let mut a = Agent::new(cfg, Box::new(DryInput::new()));
+    a.arm(true);
+
+    // (起, 止, 木头档, 敌人数, 距离档, 血量, 游戏内时间, 说明)
+    // 冷却默认 8 秒，所以"怪走了"那段必须给足 8 秒，否则演示里根本看不到
+    // 「回来接着砍」这一拍 —— 时间线要跟着真实参数走，不能凭感觉编。
+    let scenes: [(u64, u64, i32, i32, i32, f32, i32, &str); 7] = [
+        (0, 3_000, 6, 0, 0, 20.0, 8_000, "安全，树在 6 格 → 走过去"),
+        (3_000, 6_000, 3, 0, 0, 20.0, 8_000, "到 3 格 → 按住左键砍"),
+        (6_000, 8_000, 3, 1, 6, 20.0, 8_000, "冒出一只僵尸 → 立刻收手"),
+        (8_000, 14_000, 3, 0, 0, 20.0, 8_000, "怪走了，但冷却 8 秒没完 → 不回去砍"),
+        // 冷却结束后还要重新攒 2.5 秒安全窗口，所以这里必须留满
+        (14_000, 19_000, 3, 0, 0, 20.0, 8_000, "冷却过了 → 重新攒窗口，然后接着砍"),
+        (19_000, 21_000, 3, 0, 0, 9.0, 8_000, "掉到 45% 血 → 停手"),
+        (21_000, 23_000, 3, 0, 0, 20.0, 15_000, "血回满但天黑了 → 夜里不砍"),
+    ];
+
+    println!("tick  phase   gather  why          move pitch atk   说明");
+    let mut last: Option<(Phase, trit_agent::gather::Mode, trit_agent::gather::Why, Tri, Tri, bool)> =
+        None;
+    // 模拟的视线俯仰角。真实环境里这是数据包每秒报一次的绝对值；
+    // 这里按 look_rate 推算，好让演示能看出「闭环对准」在动。
+    let mut cur_pitch = 0.0f32;
+
+    for t in (0..=23_000).step_by(100) {
+        let sc = scenes
+            .iter()
+            .find(|s| t >= s.0 && t < s.1)
+            .copied()
+            .unwrap_or(scenes[scenes.len() - 1]);
+
+        // 数据包是 20 tick（1 秒）一报，这里照旧
+        if t % 1_000 == 0 {
+            a.ingest(
+                LogEvent::Sensor(Sensor {
+                    hp: sc.5,
+                    food: 18,
+                    x: 0.0,
+                    y: 64.0,
+                    z: 0.0,
+                    hostiles: sc.3,
+                    dist_tier: sc.4,
+                    hazard_tier: 0,
+                    wood_tier: sc.2,
+                    wood_dir: 0,
+                    tod: sc.6,
+                    pitch: cur_pitch,
+                }),
+                t,
+            );
+        }
+
+        let d = a.step(t, 5);
+        // 每拍 100ms，look_rate 55°/s ≈ 5.5°/拍
+        if d.dirs[Channel::Pitch.index()] != Tri::Zero {
+            cur_pitch += d.dirs[Channel::Pitch.index()].to_f32() * 5.5;
+            cur_pitch = cur_pitch.clamp(-90.0, 90.0);
+        }
+        // phase 也要进 key：否则「交战 → 停战」那一拍不会打出来，
+        // 看起来像 AI 一直卡在交战里。
+        let key = (
+            d.phase,
+            a.gather.mode,
+            a.gather.why,
+            d.dirs[Channel::Forward.index()],
+            d.dirs[Channel::Pitch.index()],
+            d.attack_hold,
+        );
+        if last != Some(key) || verbose {
+            println!(
+                "{:<5} {:<7} {:<7} {:<12} {:^4} {:^5} {:<5} {} [p={:>4.0}]",
+                t,
+                d.phase.name(),
+                a.gather.mode.name(),
+                a.gather.why.as_str(),
+                d.dirs[Channel::Forward.index()].ch(),
+                d.dirs[Channel::Pitch.index()].ch(),
+                if d.attack_hold {
+                    "按住"
+                } else if d.dirs[Channel::Attack.index()] == Tri::Pos {
+                    "点"
+                } else {
+                    "-"
+                },
+                sc.7,
+                cur_pitch
+            );
+            last = Some(key);
+        }
+    }
+
+    println!();
+    println!(
+        "共砍 {} 棵，被打断 {} 次（最后一次：{}）",
+        a.gather.chopped,
+        a.gather.interrupted,
+        a.gather.interrupted_by.as_str()
+    );
+    println!("说明：atk 列「按住」= 正在砍方块，「点」= 单次挥击，「-」= 不按。");
 }
 
 // ---------------------------------------------------------------- probe

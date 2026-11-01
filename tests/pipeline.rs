@@ -135,6 +135,10 @@ fn sensor(hp: f32, hostiles: i32, tier: i32) -> LogEvent {
         hostiles,
         dist_tier: tier,
         hazard_tier: 0,
+        wood_tier: 0,
+        wood_dir: 0,
+        tod: 8_000,
+        pitch: 0.0,
     })
 }
 
