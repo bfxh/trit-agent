@@ -60,6 +60,7 @@ fn help() {
   trit-agent selftest [--hz 200] [--secs 2]   逻辑自检 + 高频节拍实测
   trit-agent sim [--verbose]                  离线场景回放（战斗 / 战法）
   trit-agent sim --gather                     离线回放「采集门控」：什么时候不该砍
+  trit-agent sim --mine                       离线回放挖矿：五种死法各演一次
   trit-agent probe [--config path] [--profile <整合包目录>]
   trit-agent run   [--config path] [--seconds N] [--hz N] [--mode hold|patrol|follow]
                    [--profile <整合包目录>] [--window 关键字] [--log path]
@@ -444,6 +445,13 @@ fn sim(flags: &Flags) {
 
 // ---------------------------------------------------------------- sim --gather
 
+/// 演示里"砍断一棵树"需要的累计按住时长。
+///
+/// 真实值取决于工具和附魔（木头裸手约 3~15 秒，斧头约 1~2 秒）。
+/// 这里取 1.5 秒当个好看的演示节奏 —— 它只影响回放的时间线走多快，
+/// 不影响任何实际决策逻辑。
+const FELL_MS: u64 = 1_500;
+
 // ---------------------------------------------------------------- 演示表格
 
 /// 单元格对齐方式。中文占两列，数字要右对齐才对得齐末尾。
@@ -552,6 +560,17 @@ mode = hold
     // 这里按 look_rate 推算，好让演示能看出「闭环对准」在动。
     let mut cur_pitch = 0.0f32;
 
+    // ---- 模拟「砍断」 ----
+    // 场景表只能声明"这一段时间木头在几格"，但砍树是个会**改变世界**的动作：
+    // 树被砍断后它就该消失，传感器下一拍才报 w=0，AI 据此确认"采掉了一个"。
+    // 原先场景表里 wood_tier 全程不为 0，于是演示砍了 19 秒、结尾却写
+    // 「共砍 0 棵」 —— 读的人第一反应是采集坏了。这里按累计砍伐时长把
+    // 木头标记为已砍倒，让「动手 → 消失 → 确认 → 计数 → 配额」整条闭环
+    // 真的走一遍。这也是我们唯一能离线验证它的地方。
+    let mut chop_accum_ms = 0u64;
+    let mut tree_alive = true;
+    let mut gone_ms = 0u64;
+
     for t in (0..=23_000).step_by(100) {
         let sc = scenes
             .iter()
@@ -582,7 +601,7 @@ mode = hold
                     hostiles: Some(sc.3),
                     dist_tier: Some(sc.4),
                     hazard_tier: Some(0),
-                    wood_tier: Some(sc.2),
+                    wood_tier: Some(if tree_alive { sc.2 } else { 0 }),
                     wood_dir: Some(0),
                     tod: Some(sc.6),
                     ..Default::default()
@@ -592,6 +611,26 @@ mode = hold
         }
 
         let d = a.step(t, 5);
+        // 累计"真的在按住左键砍"的时长，够一棵树的量就把木头标记成已砍倒。
+        // 只认 attack_hold 而不是 mode==Chop：扫视插播那 350ms 是停手的，
+        // 算进去的话砍伐时间线会偏快，和真实节奏对不上。
+        if d.attack_hold {
+            chop_accum_ms += 100;
+        }
+        if tree_alive {
+            if chop_accum_ms >= FELL_MS {
+                tree_alive = false;
+                gone_ms = 0;
+                chop_accum_ms = 0;
+            }
+        } else {
+            gone_ms += 100;
+            // 砍倒后歇 3 秒，当作"走向下一棵树"的时间
+            if gone_ms >= 3_000 {
+                tree_alive = true;
+            }
+        }
+
         // 每拍 100ms，look_rate 55°/s ≈ 5.5°/拍
         if d.dirs[Channel::Pitch.index()] != Tri::Zero {
             cur_pitch += d.dirs[Channel::Pitch.index()].to_f32() * 5.5;
