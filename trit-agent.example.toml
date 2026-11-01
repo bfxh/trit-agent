@@ -51,6 +51,32 @@ tac_guard = true
 # 卡住 1.2 秒就低头砍墙
 tac_breach = true
 
+# ---- 战法（孙子兵法）：一次只生效一条，优先级 走为上 > 以逸待劳 > 兵贵神速 > 围点打援 > 声东击西 ----
+# 走为上：血 < 35%，或血 < 50% 且被两只以上围 → 后退脱离
+strat_retreat = true
+# 以逸待劳：血不满(75%以下)且敌人还在 10 格外 → 站着回血，等它走过来
+strat_wait = true
+# 兵贵神速：血 > 80% 且只有一只且距离 6~12 格 → 全速压上，把距离带的"站住"压掉
+strat_blitz = true
+# 围点打援：两只以上且在 6 格外 → 不冲群，绕到侧面把最前那只放出来单杀
+strat_ambush = true
+# 声东击西：交战中贴身 6 格内 → 持续侧移，方向每 strat_feint_ms 翻转
+strat_feint = true
+strat_feint_ms = 700
+
+# ---- 共同意识：一个大脑控多个身体 ----
+# 打开后 AI 会同时指挥你的铁傀儡/狼（数据包 squad 用 tag 认人）
+squad = false
+# 指令通道：off = 只算不指挥 / dry = 只记录不真发 / chat = 走游戏命令框真发（需开作弊）
+# 建议先用 dry 确认判断对不对，再改 chat
+squad_control = "dry"
+# 超过这个距离先让它们集合，不要各打各的（会被逐个击破）
+squad_engage_dist = 12
+# 低于这个血量且有威胁 → 召回护主
+squad_recall_hp = 0.45
+# 两条指令的最小间隔。指令是打字打进去的，太密会互相打断
+squad_cmd_gap_ms = 1200
+
 # 战斗节奏
 attack_interval_ms = 620
 jump_crit_every = 2

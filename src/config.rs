@@ -82,6 +82,34 @@ impl Default for Tactics {
     }
 }
 
+/// 指令通道。决定「共同意识」用哪条路把意图传给从属实体。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ControlChannel {
+    /// 完全不用，只算意图不下发
+    Off,
+    /// 只记录，不真发。想先看 AI 打算怎么指挥、又不想让它动的时候用
+    Dry,
+    /// 走游戏命令框真发。需要单人世界开作弊
+    Chat,
+}
+
+impl ControlChannel {
+    pub fn parse(s: &str) -> ControlChannel {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "chat" | "command" | "cmd" | "游戏" => ControlChannel::Chat,
+            "dry" | "log" | "只记录" => ControlChannel::Dry,
+            _ => ControlChannel::Off,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ControlChannel::Off => "off",
+            ControlChannel::Dry => "dry",
+            ControlChannel::Chat => "chat",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     /// 状态机内部节拍。默认 200 Hz（游戏是 20 TPS，这里是它的 10 倍，
@@ -109,6 +137,12 @@ pub struct Config {
     pub mode: Mode,
     pub channels: Channels,
     pub tactics: Tactics,
+    /// 战法（孙子兵法）。一次只生效一条，见 [`crate::strategy::select`]。
+    pub strategies: crate::strategy::Strategies,
+
+    /// 共同意识：一个大脑控多个身体
+    pub squad: crate::squad::SquadCfg,
+    pub squad_control: ControlChannel,
 
     pub attack_interval_ms: u64,
     pub jump_crit_every: u32,
@@ -150,6 +184,9 @@ impl Default for Config {
             mode: Mode::Hold,
             channels: Channels::default(),
             tactics: Tactics::default(),
+            strategies: crate::strategy::Strategies::default(),
+            squad: crate::squad::SquadCfg::default(),
+            squad_control: ControlChannel::Off,
             attack_interval_ms: 620,
             jump_crit_every: 2,
             strafe_flip_ms: 900,
@@ -274,6 +311,43 @@ impl Config {
         if let Some(v) = g("ch_use").and_then(|v| parse_bool(&v)) {
             c.channels.use_item = v;
         }
+
+        // ---- 战法（孙子兵法）----
+        if let Some(v) = g("strat_retreat").and_then(|v| parse_bool(&v)) {
+            c.strategies.retreat = v;
+        }
+        if let Some(v) = g("strat_wait").and_then(|v| parse_bool(&v)) {
+            c.strategies.wait = v;
+        }
+        if let Some(v) = g("strat_blitz").and_then(|v| parse_bool(&v)) {
+            c.strategies.blitz = v;
+        }
+        if let Some(v) = g("strat_ambush").and_then(|v| parse_bool(&v)) {
+            c.strategies.ambush = v;
+        }
+        if let Some(v) = g("strat_feint").and_then(|v| parse_bool(&v)) {
+            c.strategies.feint = v;
+        }
+        if let Some(v) = g("strat_feint_ms").and_then(|v| v.parse::<u64>().ok()) {
+            c.strategies.feint_ms = v.clamp(150, 5_000);
+        }
+
+        // ---- 共同意识 ----
+        if let Some(v) = g("squad").and_then(|v| parse_bool(&v)) {
+            c.squad.enabled = v;
+        }
+        if let Some(v) = g("squad_control") {
+            c.squad_control = ControlChannel::parse(&v);
+        }
+        if let Some(v) = g("squad_engage_dist").and_then(|v| v.parse::<f32>().ok()) {
+            c.squad.engage_dist = v.clamp(2.0, 64.0);
+        }
+        if let Some(v) = g("squad_recall_hp").and_then(|v| v.parse::<f32>().ok()) {
+            c.squad.recall_hp = v.clamp(0.05, 0.95);
+        }
+        if let Some(v) = g("squad_cmd_gap_ms").and_then(|v| v.parse::<u64>().ok()) {
+            c.squad.min_interval_ms = v.clamp(200, 30_000);
+        }
         c
     }
 }
@@ -365,6 +439,31 @@ tac_hazard = true
 tac_guard = true
 # 卡住 1.2 秒就低头砍墙
 tac_breach = true
+
+# ---- 战法（孙子兵法）：一次只生效一条，优先级 走为上 > 以逸待劳 > 兵贵神速 > 围点打援 > 声东击西 ----
+# 走为上：血 < 35%，或血 < 50% 且被两只以上围 → 后退脱离
+strat_retreat = true
+# 以逸待劳：血不满(75%以下)且敌人还在 10 格外 → 站着回血，等它走过来
+strat_wait = true
+# 兵贵神速：血 > 80% 且只有一只且距离 ≤ 12 格 → 全速压上，把距离带的"站住"压掉
+strat_blitz = true
+# 围点打援：两只以上且在 6 格外 → 不冲群，绕到侧面把最前那只放出来单杀
+strat_ambush = true
+# 声东击西：交战中贴身 6 格内 → 持续侧移，方向每 strat_feint_ms 翻转
+strat_feint = true
+strat_feint_ms = 700
+
+# ---- 共同意识：一个大脑控多个身体 ----
+# 打开后 AI 会同时指挥你的铁傀儡/狼（数据包 squad 用 tag 认人）
+squad = false
+# 指令通道：off = 只算不指挥 / dry = 只记录不真发 / chat = 走游戏命令框真发（需开作弊）
+squad_control = "dry"
+# 超过这个距离先让它们集合，不要各打各的（会被逐个击破）
+squad_engage_dist = 12
+# 低于这个血量且有威胁 → 召回护主
+squad_recall_hp = 0.45
+# 两条指令的最小间隔。指令是打字打进去的，太密会互相打断
+squad_cmd_gap_ms = 1200
 
 # 战斗节奏
 attack_interval_ms = 620

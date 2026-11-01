@@ -130,6 +130,12 @@ pub struct WorldView {
     pub dist: Option<f32>,
     /// 爆炸危险：Pos 必须躲，Neg 明确安全，Zero 边缘/未知。
     pub hazard: Tri,
+    /// 附近敌对生物的**数量**。None = 不知道有几只（不是「没有」）。
+    ///
+    /// 和 `dist` 分开是因为战法要的判据不同：
+    /// 「兵贵神速」要单敌（1 只才敢突），「围点打援」要多敌（3 只以上才值得绕侧）。
+    /// 只知道最近距离的话，这两种局在数据上长得一模一样。
+    pub enemies: Option<u32>,
     /// 是否卡住（位移长时间为 0）
     pub stuck: bool,
     /// 当前坐标（x, y, z）。None = 还没读到过。

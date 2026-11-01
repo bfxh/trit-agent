@@ -70,4 +70,10 @@ impl Input for DryInput {
     fn last_badge(&self) -> Option<String> {
         self.badge.clone()
     }
+    fn type_command(&mut self, cmd: &str) -> bool {
+        // 不开游戏也能验证整条「意识 → 指令」链路
+        self.bump("type_command");
+        self.log.push(format!("cmd {cmd}"));
+        true
+    }
 }

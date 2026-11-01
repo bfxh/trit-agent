@@ -2,13 +2,27 @@
 
 use crate::act::{Button, Input};
 use crate::behaviors::{Behaviors, Ctx};
-use crate::config::{Config, Mode};
+use crate::config::{Config, ControlChannel, Mode};
 use crate::fsm::{Channel, Decision, Machine, Phase, Vote, WorldView};
 use crate::perceive::logtail::LogTail;
 use crate::perceive::{LogEvent, Sensor};
+use crate::squad::{CommandSink, DrySink, Squad};
+use crate::strategy::StratState;
 use crate::trit::Tri;
 use std::io::Write;
 use std::time::{Duration, Instant};
+
+/// 把 [`CommandSink`] 接到键鼠注入上：指令走游戏命令框真发。
+struct InputSink<'a>(&'a mut dyn Input);
+
+impl CommandSink for InputSink<'_> {
+    fn kind(&self) -> &'static str {
+        "chat"
+    }
+    fn send(&mut self, cmd: &str) -> bool {
+        self.0.type_command(cmd)
+    }
+}
 
 /// 一次点击最少按住多久（毫秒）。16ms 一帧，70ms 保证跨 3~4 帧。
 const MIN_CLICK_MS: u64 = 70;
@@ -61,10 +75,19 @@ pub struct Agent {
     pub threat_until: u64,
     pub contact_until: u64,
     pub dead: bool,
+    /* 态势 */
     /// 最近敌对生物距离档（0 = 无）
     dist_tier: i32,
     /// 最近爆炸源距离档（0 = 无）
     hazard_tier: i32,
+    /// 附近敌对生物数量。None = 还没收到过传感器
+    hostiles: Option<u32>,
+
+    /* 战法与共同意识 */
+    pub strat: StratState,
+    pub squad: Squad,
+    /// `squad_control = dry` 时的落地通道
+    dry_cmd: DrySink,
     /* 卡住检测：累计路程窗口 */
     pos_last: Option<(f32, f32, f32)>,
     pos_win_start: u64,
@@ -146,6 +169,10 @@ impl Agent {
             dead: false,
             dist_tier: 0,
             hazard_tier: 0,
+            hostiles: None,
+            strat: StratState::new(),
+            squad: Squad::new(cfg.squad),
+            dry_cmd: DrySink::default(),
             pos_last: None,
             pos_win_start: 0,
             pos_travel: 0.0,
@@ -419,6 +446,7 @@ impl Agent {
                 self.dead = s.hp <= 0.0;
                 self.dist_tier = s.dist_tier;
                 self.hazard_tier = s.hazard_tier;
+                self.hostiles = Some(s.hostiles.max(0) as u32);
                 // 敌人数和距离档任一非零都算有威胁：数据包的计数有半径上限，
                 // 而距离档是独立的几档判定，两边取并集才不会漏。
                 if s.hostiles > 0 || s.dist_tier > 0 {
@@ -445,6 +473,8 @@ impl Agent {
                 self.threat = Tri::Zero;
                 self.threat_until = 0;
                 self.contact_until = 0;
+                // 死了就别再指挥宠物了：这时候发指令只会在死亡界面里乱敲
+                self.hostiles = None;
             }
             LogEvent::Join(_) => {
                 self.dead = false;
@@ -536,15 +566,90 @@ impl Agent {
                 self.tactics_line()
             }
             "status" => format!(
-                "{} phase={} hp={} {}",
+                "{} phase={} hp={} {} {} {}",
                 if self.armed { "armed" } else { "off" },
                 self.machine.phase.name(),
                 self.hp.map(|h| format!("{h:.1}")).unwrap_or("?".into()),
-                self.tactics_line()
+                self.tactics_line(),
+                self.strategy_line(),
+                self.squad.line(self.cfg.squad_control.as_str())
             ),
-            _ => "? !ai !mode !tac !attack !move !look !jump !use !threat !calm !status".to_string(),
+            "squad" => match arg.as_str() {
+                "" => self.squad.line(self.cfg.squad_control.as_str()),
+                "on" | "1" => {
+                    self.cfg.squad.enabled = true;
+                    self.squad.cfg.enabled = true;
+                    "squad on".to_string()
+                }
+                "off" | "0" => {
+                    self.cfg.squad.enabled = false;
+                    self.squad.cfg.enabled = false;
+                    self.squad.set_manual(None);
+                    "squad off".to_string()
+                }
+                "auto" => {
+                    self.squad.set_manual(None);
+                    "squad auto".to_string()
+                }
+                other => match crate::squad::Intent::parse(other) {
+                    Some(i) => {
+                        self.squad.set_manual(Some(i));
+                        format!("squad manual {}", i.name())
+                    }
+                    None => "? !squad on|off|auto|hold|engage|regroup|recall".to_string(),
+                },
+            },
+            "strat" => match arg.as_str() {
+                "" => self.strategy_line(),
+                "on" | "1" => {
+                    self.cfg.strategies = crate::strategy::Strategies {
+                        feint_ms: self.cfg.strategies.feint_ms,
+                        ..Default::default()
+                    };
+                    self.strategy_line()
+                }
+                "off" | "0" => {
+                    self.cfg.strategies.retreat = false;
+                    self.cfg.strategies.wait = false;
+                    self.cfg.strategies.blitz = false;
+                    self.cfg.strategies.ambush = false;
+                    self.cfg.strategies.feint = false;
+                    "strat all off".to_string()
+                }
+                other => {
+                    let s = &mut self.cfg.strategies;
+                    match other {
+                        "retreat" => s.retreat = !s.retreat,
+                        "wait" => s.wait = !s.wait,
+                        "blitz" => s.blitz = !s.blitz,
+                        "ambush" => s.ambush = !s.ambush,
+                        "feint" => s.feint = !s.feint,
+                        _ => {}
+                    }
+                    self.strategy_line()
+                }
+            },
+            _ => "? !ai !mode !tac !strat !squad !attack !move !look !jump !use !threat !calm !status".to_string(),
         };
         reply
+    }
+
+    /// 当前生效的战法一行摘要。
+    fn strategy_line(&self) -> String {
+        let s = &self.cfg.strategies;
+        let on = |b: bool| if b { "+" } else { "-" };
+        format!(
+            "strat={}{}{}{}{} 生效={}",
+            on(s.retreat),
+            on(s.wait),
+            on(s.blitz),
+            on(s.ambush),
+            on(s.feint),
+            match self.strat.active {
+                Some(x) => x.name(),
+                None => "-",
+            }
+        )
     }
 
     /// 战术开关的一行摘要，给 `!status` 和 `!tac` 用。
@@ -571,6 +676,7 @@ impl Agent {
             contact: self.contact_until > now_ms,
             dist,
             hazard,
+            enemies: self.hostiles,
             stuck: self.stuck,
             pos: self.pos_last,
             dead: self.dead,
@@ -606,10 +712,74 @@ impl Agent {
             now_ms,
             dt_ms,
         };
-        let votes: Vec<Vote> = self.behaviors.vote(&ctx);
+
+        // 共同意识先跑：让从属实体跟上同一份判断。
+        // 放在行为投票之前，是因为它可能要打字发指令（阻塞 ~300ms），
+        // 打完字按键状态必须重置，否则这一拍的 apply 会以为键还按着。
+        self.drive_squad(&w, now_ms);
+
+        let mut votes: Vec<Vote> = self.behaviors.vote(&ctx);
+        // 战法层只追加票，不改别人投的票
+        let active = crate::strategy::select(&w, &self.cfg.strategies);
+        crate::strategy::apply(
+            active,
+            &mut votes,
+            now_ms,
+            &mut self.strat,
+            &self.cfg.strategies,
+        );
         let d = self.machine.step(&w, &votes, &self.channels);
         self.apply(&d, now_ms, dt_ms);
         d
+    }
+
+    /// 把当前意图下发给从属实体（傀儡 / 狼）。
+    fn drive_squad(&mut self, w: &WorldView, now_ms: u64) {
+        match self.cfg.squad_control {
+            ControlChannel::Off => {
+                // 通道关着也要更新意图，`!squad` 才能看到 AI 打算怎么指挥
+                self.squad.plan(w);
+            }
+            ControlChannel::Dry => {
+                let fired = self.squad.tick(w, now_ms, &mut self.dry_cmd);
+                if fired {
+                    let last = self.dry_cmd.log.last().cloned().unwrap_or_default();
+                    println!("[squad] {last}");
+                }
+            }
+            ControlChannel::Chat => {
+                let mut sink = InputSink(&mut *self.input);
+                let fired = self.squad.tick(w, now_ms, &mut sink);
+                if fired {
+                    // 打字过程中 input 层已经松开所有键，这里要把 Agent 自己的
+                    // 「我以为按着」也清掉，否则下一拍 set_key_w(true) 会因为
+                    // key_w 已经是 true 而不再真的按键 —— 角色就不动了。
+                    self.reset_key_state();
+                }
+            }
+        }
+    }
+
+    /// 忘掉「按键状态」的缓存，让下一拍 apply 重新按一遍。
+    fn reset_key_state(&mut self) {
+        self.key_w = false;
+        self.key_s = false;
+        self.key_a = false;
+        self.key_d = false;
+        self.key_space = false;
+        self.key_shift = false;
+        self.btn_left = false;
+        self.btn_right = false;
+    }
+
+    /// `squad_control = dry` 时已经下发的指令（给 `!squad` 和测试用）。
+    pub fn squad_log(&self) -> &[String] {
+        &self.dry_cmd.log
+    }
+
+    /// 当前生效的战法（给 `!strat` 和测试用）。
+    pub fn active_strategy(&self) -> Option<crate::strategy::Strat> {
+        self.strat.active
     }
 
     /// 前台门控：目标窗口不在前台就一律不注入。
@@ -1145,5 +1315,50 @@ mod tests {
         a.arm(true);
         assert!(a.is_armed());
         assert_eq!(a.machine.ticks, ticks_before);
+    }
+
+    // ---------------------------------------------------------- 战法 / 共同意识
+
+    #[test]
+    fn status_line_reports_strategy_and_squad() {
+        let mut a = agent();
+        let s = a.command("status", 0);
+        assert!(s.contains("strat="), "状态行要看得到战法: {s}");
+        assert!(s.contains("squad="), "状态行要看得到共同意识: {s}");
+    }
+
+    #[test]
+    fn strat_command_toggles_one_strategy() {
+        let mut a = agent();
+        assert!(a.cfg.strategies.blitz);
+        a.command("strat blitz", 0);
+        assert!(!a.cfg.strategies.blitz);
+        a.command("strat blitz", 0);
+        assert!(a.cfg.strategies.blitz);
+    }
+
+    #[test]
+    fn strat_off_disables_all_then_on_restores() {
+        let mut a = agent();
+        a.command("strat off", 0);
+        let s = &a.cfg.strategies;
+        assert!(!s.retreat && !s.wait && !s.blitz && !s.ambush && !s.feint);
+        a.command("strat on", 0);
+        let s = &a.cfg.strategies;
+        assert!(s.retreat && s.wait && s.blitz && s.ambush && s.feint);
+    }
+
+    #[test]
+    fn squad_on_off_keeps_manual_intent_consistent() {
+        let mut a = agent();
+        a.command("squad resume", 0); // 无效参数不该改状态
+        assert_eq!(a.squad.manual, None);
+        a.command("squad on", 0);
+        assert!(a.squad.cfg.enabled);
+        a.command("squad recall", 0);
+        assert_eq!(a.squad.manual, Some(crate::squad::Intent::Recall));
+        a.command("squad off", 0);
+        assert!(!a.squad.cfg.enabled);
+        assert_eq!(a.squad.manual, None, "关掉时要清掉手动意图，否则下次打开还是召回");
     }
 }

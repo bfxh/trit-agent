@@ -81,7 +81,24 @@ fn help() {
   !ai on / !ai off      !status
   !mode hold|patrol|follow
   !attack off   !move off   !look off   !jump off   !use off
+  !tac off             四条移植战术（关掉 = 回到没那一档的原版行为）
+  !strat               战法；!strat off 全关，!strat ambush 单独翻
+  !squad               共同意识；!squad on|off，!squad recall 手动下令
   !threat       !calm       !panic
+
+战法（孙子兵法，一次只生效一条，优先级从高到低）:
+  走为上    血 <35%，或 <50% 且被 2 只以上围 → 后退脱离
+  以逸待劳  血 <75% 且敌人还在 10 格外 → 站着回血，别残血接战
+  兵贵神速  血 >80% 且单敌且 6~12 格 → 全速压上（进了交战带就交回距离带）
+  围点打援  2 只以上且 6 格外 → 不冲群，绕侧把最前那只放出来单杀
+  声东击西  贴身 6 格内 → 持续侧移，每 700ms 换向
+
+共同意识（一个大脑控多个身体）:
+  打开 squad 后，同一个决策核同时指挥你和你的傀儡/狼。
+  执行端是数据包 squad：/function squad:recruit 收编，dismiss 解散。
+  傀儡和狼没有输入通道，只能改 AngryAt —— 所以是「意图级」不是逐帧。
+  squad_control: off 只算不指挥 / dry 只记录 / chat 走命令框真发（需开作弊）。
+  想接对讲机、语音、第二屏：见 docs/CONTROLS.md。
 "#
     );
 }
@@ -305,9 +322,10 @@ fn sim(flags: &Flags) {
         (10_400, 13_000, 1, 32, 0, true, "被墙挡住：想追但走不动 → 低头砍墙"),
     ];
 
-    println!("tick  phase   move strafe yaw pitch atk jump use  说明");
+    println!("tick  phase   move strafe yaw pitch atk jump use  strategy   说明");
     let mut last: Option<[Tri; 7]> = None;
     let mut last_phase = Phase::Off;
+    let mut last_strat = "";
     let mut mz = 0.0f32;
     let mut mx = 0.0f32; // 模拟坐标：真的会随按键移动，否则卡住检测会误报
     let mut next_sense = 0u64;
@@ -338,14 +356,15 @@ fn sim(flags: &Flags) {
         }
 
         let d = a.step(t, 5);
+        let strat = a.active_strategy().map(|s| s.id()).unwrap_or("-");
         let changed = match last {
             None => true,
-            Some(p) => p != d.dirs || d.phase != last_phase,
+            Some(p) => p != d.dirs || d.phase != last_phase || strat != last_strat,
         };
         if changed || verbose {
             let dirs = &d.dirs;
             println!(
-                "{:<5} {:<7} {:^4} {:^6} {:^3} {:^5} {:^3} {:^4} {:^3}  {}",
+                "{:<5} {:<7} {:^4} {:^6} {:^3} {:^5} {:^3} {:^4} {:^3}  {:<9}  {}",
                 t,
                 d.phase.name(),
                 dirs[Channel::Forward.index()].ch(),
@@ -355,10 +374,12 @@ fn sim(flags: &Flags) {
                 dirs[Channel::Attack.index()].ch(),
                 dirs[Channel::Jump.index()].ch(),
                 dirs[Channel::Use.index()].ch(),
+                strat,
                 format!("{}{}", scene.6, if a.world(t, t).stuck { "  [stuck]" } else { "" })
             );
             last = Some(*dirs);
             last_phase = d.phase;
+            last_strat = strat;
         }
 
         // 模拟位移：前进约 4.3 格/秒，横移约 3 格/秒。

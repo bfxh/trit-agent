@@ -1,0 +1,6 @@
+{
+  "pack": {
+    "pack_format": 9,
+    "description": "squad：共同意识的执行端。外部 AI 用 /function squad:* 指挥你的傀儡和狼"
+  }
+}

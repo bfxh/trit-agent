@@ -1,0 +1,75 @@
+name: 认领一个操控方式
+description: 给 trit-agent 接一条新的输入/输出通道（对讲机、语音、HTTP、手柄…）
+title: "[control] "
+labels: ["control-channel", "help wanted"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        先读 [`docs/CONTROLS.md`](../blob/main/docs/CONTROLS.md)，
+        里面有现状表、走不通的路、以及实现骨架。
+
+        一条操控方式 = 一个 `CommandSink` 实现 + 表格里的一行 + 3 个测试。
+
+  - type: input
+    id: channel
+    attributes:
+      label: 通道 ID
+      description: 小写带连字符，会写进 `squad_control` 配置
+      placeholder: walkie-talkie
+    validations:
+      required: true
+
+  - type: dropdown
+    id: direction
+    attributes:
+      label: 方向
+      description: 只能"出"的通道指挥游戏；"入"的通道读取游戏
+      options:
+        - 出（指挥游戏）
+        - 入（读取游戏）
+        - 双向
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: 它解决什么现有通道解决不了的问题
+      description: |
+        别写「这样更酷」。要具体：现有通道在什么场景下不够用。
+        例如「键鼠注入要求人在同一台机器，但挂机时需要远程问一句状态」。
+    validations:
+      required: true
+
+  - type: textarea
+    id: deps
+    attributes:
+      label: 依赖
+      description: 硬件型号 / 要不要装 mod / 要不要开端口 / 平台限制。**写实**，别省。
+      placeholder: |
+        需要：一个串口对讲机模块（型号待定）
+        不需要：mod、开端口
+        限制：Windows / Linux，macOS 未测
+    validations:
+      required: true
+
+  - type: textarea
+    id: plan
+    attributes:
+      label: 打算怎么实现
+      description: 在哪里放代码、怎么测试（没有硬件时怎么测）
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 自检
+      options:
+        - label: 我读过 CONTROLS.md 里「走不通的路」那一节，确认这条路没被否过
+          required: true
+        - label: 我知道要改 `ControlChannel` 枚举的三个地方
+          required: true
+        - label: 我能提供至少 3 个不需要真实硬件的测试
+          required: true

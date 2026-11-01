@@ -6,6 +6,7 @@
 use super::{Button, Input};
 use std::collections::BTreeSet;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 type Hwnd = isize;
 
@@ -396,6 +397,119 @@ impl Input for Win32Input {
             set_window_title(self.hwnd, &want);
         }
     }
+
+    fn type_command(&mut self, cmd: &str) -> bool {
+        // 不在前台就绝不能打：字符会落到浏览器地址栏、IDE、搜索框里
+        if !self.is_foreground() {
+            return false;
+        }
+        let chars: Vec<char> = cmd.chars().collect();
+        let Some(&head) = chars.first() else {
+            return false;
+        };
+
+        // 斜杠用「按 `/` 键」表达（MC 里它会直接开命令框并预填 `/`），
+        // 不作为普通字符打，否则会开出两次输入框。
+        let body: &[char] = if head == '/' { &chars[1..] } else { &chars[..] };
+
+        // **先校验再动手**：只要有一个字符打不出来，整条放弃。
+        // 否则会发出半条指令 + 一个回车，游戏里就是一条不存在的命令 ——
+        // 红字刷屏，而且从现象完全看不出是「有个字符没映射」。
+        if body.iter().any(|c| vk_for_char(*c).is_none()) {
+            return false;
+        }
+
+        // 打字前先把自己按住的键全松开，否则 WASD 会插进字符中间
+        self.release_all();
+        std::thread::sleep(Duration::from_millis(60));
+
+        if head == '/' {
+            tap_key(VK_OEM_2, false);
+            std::thread::sleep(Duration::from_millis(80));
+        } else {
+            // 普通聊天内容：先按 T 开聊天框
+            tap_key(VK_T, false);
+            std::thread::sleep(Duration::from_millis(80));
+        }
+
+        for &c in body {
+            if let Some((vk, shift)) = vk_for_char(c) {
+                tap_key(vk, shift);
+                self.sent += 1;
+            }
+        }
+        tap_key(VK_RETURN, false);
+        self.sent += 1;
+        true
+    }
+}
+
+const VK_RETURN: u16 = 0x0D;
+const VK_T: u16 = 0x54;
+const VK_OEM_2: u16 = 0xBF; // `/` `?`
+const VK_OEM_1: u16 = 0xBA; // `;` `:`
+const VK_OEM_MINUS: u16 = 0xBD; // `-` `_`
+const VK_OEM_PLUS: u16 = 0xBB; // `=` `+`
+const VK_OEM_COMMA: u16 = 0xBC;
+const VK_OEM_PERIOD: u16 = 0xBE;
+const VK_OEM_4: u16 = 0xDB; // `[`
+const VK_OEM_6: u16 = 0xDD; // `]`
+const VK_OEM_7: u16 = 0xDE; // `'` `"`
+const VK_SHIFT_L: u16 = 0xA0;
+
+/// 字符 → (虚拟键码, 要不要按 Shift)。**按 US 布局**。
+///
+/// 只覆盖发指令用得到的字符集。中文、全角符号一律返回 None —— 与其猜，
+/// 不如让调用方知道「这条指令发不全」。
+fn vk_for_char(c: char) -> Option<(u16, bool)> {
+    let v = c as u32;
+    Some(match c {
+        'a'..='z' => (0x41 + (v - 'a' as u32) as u16, false),
+        'A'..='Z' => (0x41 + (v - 'A' as u32) as u16, true),
+        '0'..='9' => (0x30 + (v - '0' as u32) as u16, false),
+        ' ' => (0x20, false),
+        '/' => (VK_OEM_2, false),
+        '?' => (VK_OEM_2, true),
+        ';' => (VK_OEM_1, false),
+        ':' => (VK_OEM_1, true),
+        '-' => (VK_OEM_MINUS, false),
+        '_' => (VK_OEM_MINUS, true),
+        '=' => (VK_OEM_PLUS, false),
+        '+' => (VK_OEM_PLUS, true),
+        ',' => (VK_OEM_COMMA, false),
+        '<' => (VK_OEM_COMMA, true),
+        '.' => (VK_OEM_PERIOD, false),
+        '>' => (VK_OEM_PERIOD, true),
+        '[' => (VK_OEM_4, false),
+        '{' => (VK_OEM_4, true),
+        ']' => (VK_OEM_6, false),
+        '}' => (VK_OEM_6, true),
+        '\'' => (VK_OEM_7, false),
+        '"' => (VK_OEM_7, true),
+        '@' => (0x32, true), // Shift+2
+        '!' => (0x31, true), // Shift+1
+        '*' => (0x38, true), // Shift+8
+        _ => return None,
+    })
+}
+
+/// 打一个字符：按下、停 4ms、松开。Shift 包在外层。
+///
+/// 4ms 是按帧采样的下限试出来的：MC 每帧约 16ms，down/up 都短于 1ms 的脉冲
+/// 在 GLFW 的字符回调里会被吞（和攻击键踩的是同一个坑）。
+fn tap_key(vk: u16, shift: bool) {
+    if shift {
+        send_key(VK_SHIFT_L, true);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    send_key(vk, true);
+    std::thread::sleep(Duration::from_millis(4));
+    send_key(vk, false);
+    if shift {
+        std::thread::sleep(Duration::from_millis(2));
+        send_key(VK_SHIFT_L, false);
+    }
+    std::thread::sleep(Duration::from_millis(4));
 }
 
 #[link(name = "winmm")]
@@ -440,5 +554,49 @@ impl Hotkeys {
             *prev = now;
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typed_charset_covers_every_command_we_send() {
+        // `squad` 的四个指令 + 可能的 /execute 参数形式
+        let sample = "/function squad:engage";
+        for c in sample.chars().filter(|c| *c != '/') {
+            assert!(vk_for_char(c).is_some(), "字符 {c:?} 打不出来，指令会发不全");
+        }
+        for c in "_-:.[]=@!\"".chars() {
+            assert!(vk_for_char(c).is_some(), "符号 {c:?} 没映射");
+        }
+    }
+
+    #[test]
+    fn non_ascii_is_rejected_instead_of_guessed() {
+        // 与其猜中文怎么打，不如明确说打不出来 —— 调用方会整条放弃
+        assert!(vk_for_char('中').is_none());
+        assert!(vk_for_char('（').is_none());
+        assert!(vk_for_char('，').is_none());
+    }
+
+    #[test]
+    fn shift_is_flagged_for_shifted_symbols() {
+        assert_eq!(vk_for_char(':'), Some((VK_OEM_1, true)));
+        assert_eq!(vk_for_char('_'), Some((VK_OEM_MINUS, true)));
+        // 未上档的不该多按 Shift
+        assert_eq!(vk_for_char('/'), Some((VK_OEM_2, false)));
+        assert_eq!(vk_for_char('a'), Some((0x41, false)));
+        assert_eq!(vk_for_char('A'), Some((0x41, true)));
+    }
+
+    #[test]
+    fn badge_prefix_is_stripped_before_recomposing() {
+        // 不剥干净的话，每 500ms 刷新一次就会把前缀叠上去：
+        // [AI 接管] [AI 接管] [AI 接管] Minecraft
+        assert_eq!(strip_badge("[AI 接管] Minecraft 1.18.2"), "Minecraft 1.18.2");
+        assert_eq!(strip_badge("[AI 待机] 新的世界 - Minecraft"), "新的世界 - Minecraft");
+        assert_eq!(strip_badge("Minecraft 1.18.2"), "Minecraft 1.18.2");
     }
 }

@@ -4,6 +4,8 @@
 //! - [`trit`]：三值类型与 K3 逻辑、平衡三进制编解码
 //! - [`fsm`]：投票 / 裁决（迟滞 + 弃权）/ 阶段机
 //! - [`behaviors`]：行为库，每个行为独立投票
+//! - [`strategy`]：战法层，只调票的权重，不新增行为
+//! - [`squad`]：共同意识，一个决策核心控多个身体
 //! - [`npc`]：从 mob mod 的 AI Goal 反编译提炼的三值战术判据
 //! - [`perceive`]：日志感知
 //! - [`act`]：输入注入
@@ -16,4 +18,6 @@ pub mod config;
 pub mod fsm;
 pub mod npc;
 pub mod perceive;
+pub mod squad;
+pub mod strategy;
 pub mod trit;

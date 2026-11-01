@@ -122,3 +122,116 @@ fn death_event_is_classified_not_misfiled_as_chat() {
     let ev = trit_agent::perceive::classify("[x] [Render thread/INFO]: [CHAT] bfxh blew up");
     assert!(matches!(ev, Some(LogEvent::Death(_))));
 }
+
+// ---------------------------------------------------------------- 战法层
+
+fn sensor(hp: f32, hostiles: i32, tier: i32) -> LogEvent {
+    LogEvent::Sensor(trit_agent::perceive::Sensor {
+        hp,
+        food: 17,
+        x: 0.0,
+        y: 64.0,
+        z: 0.0,
+        hostiles,
+        dist_tier: tier,
+        hazard_tier: 0,
+    })
+}
+
+#[test]
+fn wait_strategy_stops_the_charge_when_hp_is_low_and_enemy_is_far() {
+    // 以逸待劳：血不满 + 敌人在 20 格外 → 站着回血，不该一路小跑过去残血接战
+    let cfg = Config::from_str("mode = patrol\n");
+    let mut a = Agent::new(cfg, Box::new(DryInput::new()));
+    a.arm(true);
+    a.ingest(sensor(12.0, 1, 32), 0); // hp 0.6，tier 32 → 20 格
+    let d = a.step(100, 5);
+    assert_eq!(a.active_strategy(), Some(trit_agent::strategy::Strat::Wait));
+    assert_eq!(
+        d.dirs[Channel::Forward.index()],
+        trit_agent::trit::Tri::Zero,
+        "以逸待劳必须把前进压成站住"
+    );
+}
+
+#[test]
+fn strategy_layer_can_be_switched_off() {
+    let cfg = Config::from_str("mode = patrol\nstrat_wait = false\nstrat_retreat = false\n");
+    let mut a = Agent::new(cfg, Box::new(DryInput::new()));
+    a.arm(true);
+    a.ingest(sensor(12.0, 1, 32), 0);
+    let d = a.step(100, 5);
+    assert_eq!(a.active_strategy(), None);
+    assert_eq!(
+        d.dirs[Channel::Forward.index()],
+        trit_agent::trit::Tri::Pos,
+        "关掉战法后应回到原来的巡逻推进"
+    );
+}
+
+// ------------------------------------------------------------ 共同意识
+
+#[test]
+fn squad_gets_engage_command_from_the_shared_mind() {
+    let cfg = Config::from_str("squad = true\nsquad_control = \"dry\"\n");
+    let mut a = Agent::new(cfg, Box::new(DryInput::new()));
+    a.arm(true);
+    a.ingest(sensor(20.0, 1, 3), 0); // 敌人 3 格内
+    a.step(10, 5);
+    assert_eq!(a.squad.intent, trit_agent::squad::Intent::Engage);
+    let log = a.squad_log();
+    assert!(
+        log.iter().any(|c| c == "/function squad:engage"),
+        "近身就该让宠物一起打，实际: {log:?}"
+    );
+}
+
+#[test]
+fn squad_regroups_before_charging_a_distant_enemy() {
+    let cfg = Config::from_str("squad = true\nsquad_control = \"dry\"\n");
+    let mut a = Agent::new(cfg, Box::new(DryInput::new()));
+    a.arm(true);
+    a.ingest(sensor(20.0, 2, 32), 0); // 敌人 20 格外
+    a.step(10, 5);
+    assert_eq!(a.squad.intent, trit_agent::squad::Intent::Regroup);
+    assert!(a.squad_log().iter().any(|c| c == "/function squad:regroup"));
+}
+
+#[test]
+fn squad_recalls_when_hp_is_low() {
+    let cfg = Config::from_str("squad = true\nsquad_control = \"dry\"\n");
+    let mut a = Agent::new(cfg, Box::new(DryInput::new()));
+    a.arm(true);
+    a.ingest(sensor(6.0, 1, 3), 0); // hp 0.3
+    a.step(10, 5);
+    assert_eq!(a.squad.intent, trit_agent::squad::Intent::Recall);
+    assert!(a.squad_log().iter().any(|c| c == "/function squad:recall"));
+}
+
+#[test]
+fn squad_off_sends_nothing_but_still_reports_intent() {
+    let cfg = Config::from_str("squad = false\nsquad_control = \"dry\"\n");
+    let mut a = Agent::new(cfg, Box::new(DryInput::new()));
+    a.arm(true);
+    a.ingest(sensor(20.0, 1, 3), 0);
+    a.step(10, 5);
+    assert!(a.squad_log().is_empty(), "没打开就不该发指令");
+    assert_eq!(a.squad.intent, trit_agent::squad::Intent::Hold);
+
+    // 游戏内打开后应该立刻能发
+    a.command("squad on", 0);
+    a.step(20, 5);
+    assert!(!a.squad_log().is_empty());
+}
+
+#[test]
+fn squad_chat_command_sets_manual_intent() {
+    let cfg = Config::from_str("squad = true\nsquad_control = \"dry\"\n");
+    let mut a = Agent::new(cfg, Box::new(DryInput::new()));
+    a.arm(true);
+    a.ingest(sensor(20.0, 1, 3), 0);
+    a.command("squad recall", 0);
+    a.step(10, 5);
+    assert_eq!(a.squad.intent, trit_agent::squad::Intent::Recall);
+    assert!(a.squad_log().iter().any(|c| c == "/function squad:recall"));
+}
