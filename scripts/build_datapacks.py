@@ -145,6 +145,72 @@ def validate_tag_ids(name: str) -> list[str]:
     return problems
 
 
+def validate_nbt_paths(name: str) -> list[str]:
+    """检查 `data modify ... <key> set` 之前有没有先把该 key 造出来。
+
+    `data modify` 只能写**已经存在**的 NBT 路径。狼/铁傀儡刚召唤出来时 NBT 里
+    没有 `AngryAt`、`Owner`，于是这条命令**静默失败** —— 不报错、不写日志、
+    聊天栏也没提示，表现就是「召出来不打人 / 不跟随」。同类静默失败在这个
+    仓库里已经有三起（墙方位、`minecraft:minecraft:` 前缀、窗口标题）。
+
+    判据：同一条命令序列里，`data modify X <key> set` 之前必须出现过
+    `data merge`，且那段 merge 里带了 `<key>:`。
+    """
+    src = SRC / name
+    data = src / "data"
+    if not data.is_dir():
+        return []
+
+    WATCHED = {"AngryAt", "Owner", "Tame"}
+    mod_re = re.compile(r"data modify .*?\s(\w+)\s+set\b")
+    problems: list[str] = []
+
+    def scan(seq: list[tuple[str, str]]) -> None:
+        merged: set[str] = set()
+        for where, cmd in seq:
+            if "data merge" in cmd:
+                for k in WATCHED:
+                    if f"{k}:" in cmd:
+                        merged.add(k)
+                continue
+            m = mod_re.search(cmd)
+            if m and m.group(1) in WATCHED and m.group(1) not in merged:
+                problems.append(
+                    f"{where}: `data modify ... {m.group(1)} set` 之前没有 "
+                    f"`data merge` 建字段，这条会静默失败")
+
+    for p in data.rglob("*.mcfunction"):
+        rel = p.relative_to(data)
+        lines = [(f"{rel}:{i}", ln) for i, ln in
+                 enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
+                 if ln.strip() and not ln.lstrip().startswith("#")]
+        scan(lines)
+
+    # power 里的 execute_command 也是一条命令序列
+    for p in data.rglob("*.json"):
+        try:
+            j = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        cmds: list[str] = []
+
+        def walk(o) -> None:
+            if isinstance(o, dict):
+                if o.get("type") == "origins:execute_command" and isinstance(o.get("command"), str):
+                    cmds.append(o["command"])
+                for v in o.values():
+                    walk(v)
+            elif isinstance(o, list):
+                for v in o:
+                    walk(v)
+
+        walk(j)
+        if cmds:
+            rel = p.relative_to(data)
+            scan([(f"{rel}[cmd{i}]", c) for i, c in enumerate(cmds, 1)])
+    return problems
+
+
 def build_one(name: str) -> pathlib.Path:
     src = SRC / name
     out = DIST / f"{name}.zip"
@@ -155,8 +221,12 @@ def build_one(name: str) -> pathlib.Path:
         out.unlink()
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         for p in sorted(src.rglob("*")):
-            if p.is_file():
-                z.write(p, p.relative_to(src).as_posix())
+            if not p.is_file():
+                continue
+            rel = p.relative_to(src).as_posix()
+            if rel.startswith("_") or "/_" in rel:
+                continue          # 下划线开头是工作目录（_parts 翻译分片等），不进包
+            z.write(p, rel)
     with zipfile.ZipFile(out) as z:
         validate_json(z)
     return out
@@ -222,6 +292,8 @@ def main() -> None:
             warnings.append(f"{name}: {prob}（方块标签）")
         for prob in validate_tag_ids(name):
             warnings.append(f"{name}: {prob}（tag 条目）")
+        for prob in validate_nbt_paths(name):
+            warnings.append(f"{name}: {prob}（NBT 路径）")
 
     if warnings:
         print("\n引用有问题（游戏里不会报错，只会静默失效，建议先修）：")

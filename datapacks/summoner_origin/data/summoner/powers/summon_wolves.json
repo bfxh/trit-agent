@@ -25,6 +25,18 @@
       },
       {
         "type": "origins:execute_command",
+        "command": "execute as @s at @s run data merge entity @e[type=minecraft:wolf,tag=summon_wolf_a,limit=1,sort=nearest] {Owner:[I;0,0,0,0]}"
+      },
+      {
+        "type": "origins:execute_command",
+        "command": "execute as @s at @s run data merge entity @e[type=minecraft:wolf,tag=summon_wolf_b,limit=1,sort=nearest] {Owner:[I;0,0,0,0]}"
+      },
+      {
+        "type": "origins:execute_command",
+        "command": "execute as @s at @s run data merge entity @e[type=minecraft:wolf,tag=summon_wolf_c,limit=1,sort=nearest] {Owner:[I;0,0,0,0]}"
+      },
+      {
+        "type": "origins:execute_command",
         "command": "execute as @s at @s run data modify entity @e[type=minecraft:wolf,tag=summon_wolf_a,limit=1,sort=nearest] Owner set from entity @s UUID"
       },
       {

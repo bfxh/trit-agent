@@ -43,6 +43,7 @@
 |---|---|---|
 | 直接操控傀儡和狼的移动 | ❌ | 原版 AI 写死在 Goal 里，没有输入注入点。能改的只有 `AngryAt` / `AngerTime` 两个 NBT 字段 |
 | 给村民/僵尸穿上我们的行为 | ❌ | 同上。而且只有 `wolf` / `iron_golem` / `polar_bear` 的 Goal 会读 `AngryAt` |
+| 直接 `data modify ... AngryAt set` 给刚召出来的宠物设目标 | ❌ | `data modify` 只写**已经存在**的路径。新生实体的 NBT 里没有 `AngryAt`，命令会被静默拒绝：不报错、不写日志、聊天栏也没提示。必须先 `data merge entity @s {AngryAt:[I;0,0,0,0]}` 把字段造出来再 modify。同理适用于 `Owner` |
 | 用 `SendKeys` / 消息队列发键 | ❌ | Minecraft 走 LWJGL 的原始键盘状态，收不到 WM_KEYDOWN。必须 `SendInput` |
 | 读游戏内存拿坐标 | ⚠️ 不建议 | 可行但每个版本都要重做偏移，还会被杀软当外挂。日志通道够用 |
 | 让数据包读本地文件 | ❌ | 数据包没有文件系统访问 |
