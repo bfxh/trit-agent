@@ -459,8 +459,26 @@ impl Agent {
         if !self.cfg.title_badge {
             return;
         }
-        let t = if self.armed { "[AI 接管]" } else { "[AI 待机]" };
-        self.input.badge(Some(t));
+        if self.armed {
+            self.input.badge(Some("[AI 接管]"));
+            return;
+        }
+        // **未接管时不写窗口标题。**
+        //
+        // 之前这里写 "[AI 待机]"，加上主循环每 500ms 刷一次，
+        // 等于后台守护进程空闲时也在不停地对游戏窗口发 SetWindowTextW。
+        // 而「窗口标题被外部程序改写」不是无所谓的：LWJGL 会派发窗口标题
+        // 回调，整合包里一堆 mod（Essential 的 Mixin_UpdateWindowTitle_*、
+        // itlt 的 WindowTitleMixin…）都在监听标题变化。
+        //
+        // 更要命的是时机：游戏还在加载/烘焙资源时 `player` 还是 null，
+        // 而这条崩溃就是「player 为 null 时访问 player 的方法」——
+        // 崩在加载阶段，跟标题回调恰好撞在同一段时间窗里。
+        // 既然我们没必要在待机时写标题，就别写。
+        //
+        // `badge(None)` 在「标题里本来就没有我们的前缀」时是 no-op：
+        // refresh_badge() 比较 cur 和 want，一样就不发 SetWindowTextW。
+        self.input.badge(None);
     }
 
     /// 「解开次操作」：把某一项交还给人类。
@@ -1399,8 +1417,9 @@ impl Agent {
                     }
                 );
             }
-            // 游戏自己也会改标题（切世界/进服务器），定期重挂一次
-            if self.cfg.title_badge && now_ms >= self.next_badge_ms {
+            // 游戏自己也会改标题（切世界/进服务器），定期重挂一次。
+            // **只在接管时做** —— 待机时我们不碰窗口标题（理由见 update_badge）。
+            if self.armed && self.cfg.title_badge && now_ms >= self.next_badge_ms {
                 self.next_badge_ms = now_ms + 500;
                 self.input.refresh_badge();
             }
@@ -2239,13 +2258,40 @@ mode = hold
     fn badge_tracks_armed_state() {
         let mut a = agent();
         a.update_badge();
-        assert_eq!(a.input.last_badge().as_deref(), Some("[AI 待机]"));
+        // 待机时**不写标题**（badge(None) 才是「去掉标记」的意思，
+        // 而不是「写上待机标记」）。见 update_badge 的注释。
+        assert_eq!(
+            a.input.last_badge().as_deref(),
+            None,
+            "待机时不该给窗口加标记 —— 空闲期写标题会惊动加载中的游戏"
+        );
         a.arm(true);
         a.update_badge();
         assert_eq!(a.input.last_badge().as_deref(), Some("[AI 接管]"));
         a.arm(false);
         a.update_badge();
-        assert_eq!(a.input.last_badge().as_deref(), Some("[AI 待机]"));
+        assert_eq!(
+            a.input.last_badge().as_deref(),
+            None,
+            "交还后要把标记摘掉"
+        );
+    }
+
+    /// 待机时一次都不许碰游戏窗口标题。
+    ///
+    /// 这条对着一次真实崩溃：后台守护空闲时每 500ms 发一次
+    /// `SetWindowTextW`，而游戏正好在加载阶段崩了（`player` 为 null 时
+    /// 被访问）。加载阶段最不该乱碰，所以待机期干脆一个字节都不写。
+    #[test]
+    fn idle_agent_never_touches_the_window_title() {
+        let mut a = agent();
+        a.update_badge();
+        assert_eq!(a.input.last_badge().as_deref(), None);
+        // 反复调用也不该产生任何标记
+        for _ in 0..10 {
+            a.update_badge();
+        }
+        assert_eq!(a.input.last_badge().as_deref(), None);
     }
 
     #[test]

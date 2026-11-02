@@ -72,21 +72,13 @@ fn log_line(msg: &str) {
 }
 
 /// 本地时间戳（不引 chrono，零依赖）。
+///
+/// **必须用本地时间，不能用 `SystemTime::now()`** ——
+/// 后者给的是 UTC，比崩溃报告、Minecraft 日志、本地时间**差 8 小时**。
+/// 守护日志是排查崩溃时唯一的「AI 干了什么」证据，
+/// 时间对不上，这条证据就废了。
 fn timestamp() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = now.as_secs();
-    // 用 UTC 偏移不了时区，至少给个可排序的绝对时间。
-    let days = secs / 86_400;
-    let tod = secs % 86_400;
-    format!(
-        "day{} {:02}:{:02}:{:02}",
-        days,
-        tod / 3600,
-        (tod % 3600) / 60,
-        tod % 60
-    )
+    crate::act::win32::local_time_string()
 }
 
 /// 读配置。守护进程用与前台完全一样的配置来源。
@@ -244,8 +236,12 @@ pub fn run() -> i32 {
                 "F8：已交还控制权"
             });
         }));
-        // 不接管时也要挂标题标记，让用户一眼看到「守护进程在，
-        // 按 F8 接管」。
+        // 不接管时**不碰窗口标题**。
+        //
+        // 之前这里调 `agent.update_badge()` 给标题挂上 "[AI 待机]"，
+        // 加上主循环每 500ms 刷一次 —— 相当于后台进程空闲时不停地对
+        // 游戏窗口发 SetWindowTextW。游戏加载阶段（player 还是 null）
+        // 正好在这一段时间里崩溃，所以待机期一个字都不写。
         agent.update_badge();
 
         let mut tail = LogTail::new(&log_path);

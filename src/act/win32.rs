@@ -78,6 +78,7 @@ unsafe extern "system" {
     fn GetWindowTextW(h: Hwnd, buf: *mut u16, max: i32) -> i32;
     fn GetWindowTextLengthW(h: Hwnd) -> i32;
     fn SetWindowTextW(h: Hwnd, text: *const u16) -> i32;
+    fn GetLocalTime(st: *mut SystemTime);
     fn GetClassNameW(h: Hwnd, buf: *mut u16, max: i32) -> i32;
     fn IsWindowVisible(h: Hwnd) -> i32;
     fn IsWindow(h: Hwnd) -> i32;
@@ -122,6 +123,45 @@ const EVENT_MODIFY_STATE: u32 = 0x0002;
 /// 拿错权限会让 `OpenMutexW` 直接失败，于是「进程明明在跑，
 /// 但状态查询说没跑」—— 排查时极具误导性。
 const SYNCHRONIZE: u32 = 0x0010_0000;
+
+/// Windows 的 `SYSTEMTIME` 结构。
+///
+/// 自己声明而不是引 crate —— 这个项目刻意零第三方依赖。
+#[repr(C)]
+pub struct SystemTime {
+    pub w_year: u16,
+    pub w_month: u16,
+    pub w_day_of_week: u16,
+    pub w_day: u16,
+    pub w_hour: u16,
+    pub w_minute: u16,
+    pub w_second: u16,
+    pub w_milliseconds: u16,
+}
+
+/// 取**本地**时间，格式 `2026-11-02 19:10:22`。
+///
+/// 为什么不用 `SystemTime::now()`：它给的是 UTC。而崩溃报告、
+/// Minecraft 日志、用户看到的都是本地时间 —— 日志里写 UTC 的话，
+/// 拿守护日志跟崩溃报告对时间会差 8 小时，**时间线对不上就没法判断**。
+/// 这正是排查「AI 有没有在崩溃前动过手」时最需要的那条线索。
+pub fn local_time_string() -> String {
+    let mut st = SystemTime {
+        w_year: 0,
+        w_month: 0,
+        w_day_of_week: 0,
+        w_day: 0,
+        w_hour: 0,
+        w_minute: 0,
+        w_second: 0,
+        w_milliseconds: 0,
+    };
+    unsafe { GetLocalTime(&mut st) };
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        st.w_year, st.w_month, st.w_day, st.w_hour, st.w_minute, st.w_second
+    )
+}
 
 /// 把 &str 编成 UTF-16（带结尾的 0）。
 fn wide(s: &str) -> Vec<u16> {
