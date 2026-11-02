@@ -203,6 +203,35 @@ fn enum_windows() -> Vec<WindowInfo> {
 ///
 /// 所以顺序是：标题命中且类名是 GLFW（真的游戏窗口）→ 标题以关键字开头
 /// → 标题包含关键字。
+/// 这些窗口类**绝不能**当成游戏窗口。
+///
+/// 判据是类名而不是标题：浏览器的标题什么都有 —— 一个讲 Minecraft 模组
+/// 的网页、一个叫「Minecraft 启动器」的应用、一个下载页，标题里全都
+/// 有 "Minecraft"。但它们的**类名**是稳定的：Chromium 系列一律是
+/// `Chrome_WidgetWin_*`。
+///
+/// 漏判的代价：AI 接管后所有按键（前进 / 攻击 / 空格）都打进浏览器，
+/// 角色纹丝不动，而控制台日志一切正常 —— 排查起来极其困惑。
+fn is_foreign_window_class(class_upper: &str) -> bool {
+    const FOREIGN_PREFIXES: &[&str] = &[
+        // Chromium 内核：Chrome / Edge / 各类 Electron 应用
+        "CHROME_WIDGETWIN",
+        // Firefox
+        "MOZILLAWINDOWCLASS",
+        // Windows 资源管理器 / 桌面 / 任务栏
+        "CABINETWCLASS",
+        "SHELL_TRAYWND",
+        "PROGMAN",
+        "WORKERW",
+        // 控制台 / 各种宿主窗口
+        "CONSOLEWINDOWCLASS",
+        "MSCTFIMEUI",
+    ];
+    FOREIGN_PREFIXES
+        .iter()
+        .any(|p| class_upper.starts_with(p))
+}
+
 /// 给一个候选窗口打分，分高者中选，0 分表示不合格。
 ///
 /// **类名 `GLFW*` 是决定性的**：Minecraft 走 LWJGL3，窗口类名固定是 `GLFW30`，
@@ -211,11 +240,28 @@ fn enum_windows() -> Vec<WindowInfo> {
 /// 先按标题过滤再找类名，等于在这种整合包上永远找不到窗口。
 ///
 /// 标题命中关键字只加分、不减分：用来在同时开了两个客户端时挑对那一个。
+///
+/// 但**浏览器窗口必须直接排除**：Edge/Chrome 的标题里出现 "Minecraft"
+/// 太常见了 —— 搜个「Minecraft 模组」就有好几个标签页。这窗口一旦被选中，
+/// 后果是 AI 把 W / 空格 / 左键全打进浏览器，角色在游戏里一动不动，
+/// 而控制台一切正常。
+///
+/// 判断依据用**窗口类名**（浏览器是 Chromium 的 `Chrome_WidgetWin_*`，
+/// MC 是 LWJGL3 的 `GLFW*`），比标题可靠得多。
 pub fn window_score(title: &str, class: &str, keyword: &str) -> i32 {
     let t = title.to_lowercase();
     let kw = keyword.to_lowercase();
+    let c = class.to_uppercase();
+
+    // 浏览器 / 启动器 / 资源管理器一票否决。
+    // 这不是「优先级低」，是「绝不能往里发键」—— SendInput 是系统级的，
+    // 打错窗口就是在别人的应用里乱敲键盘。
+    if is_foreign_window_class(&c) {
+        return 0;
+    }
+
     let mut score = 0;
-    if class.to_uppercase().starts_with("GLFW") {
+    if c.starts_with("GLFW") {
         score += 100;
     }
     if !kw.is_empty() && t.contains(&kw) {
@@ -645,6 +691,70 @@ mod tests {
         assert!(pick_window(&[], "minecraft").is_none());
         let cands = vec![w("记事本", "Notepad"), w("Chrome", "Chrome_WidgetWin_1")];
         assert!(pick_window(&cands, "minecraft").is_none());
+    }
+
+    /// 回归测试：浏览器窗口即使标题里有 "Minecraft" 也绝不能被选中。
+    ///
+    /// 真机上抓到的实例：Edge 打开了「Xaero 小地图更新——适用于…1.18.2…
+    /// 的 Minecraft 模组」这个网页，标题里全是 minecraft。游戏没开的时候
+    /// probe 把它当成了游戏窗口。
+    ///
+    /// 后果不是「窗口找错」这么轻：AI 接管后 SendInput 会把前进、攻击、
+    /// 空格全打进浏览器，角色在游戏里一动不动，而日志一切正常。
+    #[test]
+    fn browser_window_with_minecraft_in_title_is_never_picked() {
+        let cands = vec![
+            w(
+                "Xaero 小地图更新——适用于 1.18.2 的 Minecraft 模组！ - Microsoft Edge",
+                "Chrome_WidgetWin_1",
+            ),
+            w("Minecraft 模组下载 - Chrome", "Chrome_WidgetWin_1"),
+        ];
+        assert!(
+            pick_window(&cands, "minecraft").is_none(),
+            "浏览器窗口绝不能被当成游戏窗口"
+        );
+        assert_eq!(window_score(&cands[0].0, &cands[0].1, "minecraft"), 0);
+    }
+
+    /// 浏览器窗口即使分数高也不能压过真正的游戏窗口。
+    #[test]
+    fn real_game_window_beats_a_browser_that_mentions_minecraft() {
+        let cands = vec![
+            w(
+                "Xaero 小地图更新——适用于 1.18.2 的 Minecraft 模组！ - Edge",
+                "Chrome_WidgetWin_1",
+            ),
+            w("Annoying Villagers - Annoying Villagers", "GLFW30"),
+        ];
+        let i = pick_window(&cands, "minecraft").expect("游戏窗口必须被选中");
+        assert_eq!(cands[i].1, "GLFW30");
+    }
+
+    /// 反向锁：非浏览器的普通窗口该被选中时还得能选中。
+    ///
+    /// 「一票否决」不能连累正常候选 —— 老版本 MC 的窗口类名是 SunAwtFrame，
+    /// 整合包启动器是 Tauri Window，这些都还得认。
+    #[test]
+    fn non_browser_candidates_are_not_affected_by_the_exclusion() {
+        // 资源管理器：标题带 minecraft，但类名要排除
+        assert_eq!(
+            window_score("烦人的村民 - 文件资源管理器", "CabinetWClass", "minecraft"),
+            0,
+            "资源管理器不能当游戏窗口"
+        );
+        // 老版本 MC 的窗口类名是 SunAwtFrame：标题带关键字就得认
+        assert_ne!(
+            window_score("Minecraft 1.18.2", "SunAwtFrame", "minecraft"),
+            0,
+            "SunAwtFrame 不能被误排除"
+        );
+        // 整合包启动器：类名 Tauri Window，标题带 minecraft
+        assert_ne!(
+            window_score("Hello Minecraft! Launcher", "Tauri Window", "minecraft"),
+            0,
+            "启动器不该被浏览器规则误伤（标题命中仍算候选）"
+        );
     }
 
     #[test]

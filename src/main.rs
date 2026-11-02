@@ -848,6 +848,105 @@ fn probe(flags: &Flags) {
         p.display(),
         if p.exists() { "存在" } else { "不存在 —— 聊天感知不可用" }
     );
+
+    // 传感器活性：日志里最近有没有真的传感器数据。
+    //
+    // 这一项能一眼分清「AI 瞎了」的三种原因：窗口没找到、日志路径错、
+    // 数据包没启用（tellraw 一行都不吐）。前两种 probe 已经报了，
+    // 第三种只能看日志 —— 而它的表现和「AI 坏了」一模一样。
+    if p.exists() {
+        match sensor_activity(&p) {
+            Some((n, hp, age_s)) => {
+                println!(
+                    "传感器: 活着 —— 最近一条 {age_s}s 前，hp={hp:.1}（共 {n} 条）"
+                );
+            }
+            None => {
+                println!("传感器: **没有数据** —— 数据包没启用，或 minecraft:tick 标签作废");
+                println!("  查法：游戏里敲 /datapack enable \"file/trit_bridge.zip\"");
+                println!("  或跑 python scripts/check_env.py 看 [2] 和 [5] 两项");
+            }
+        }
+    }
+}
+
+/// 从日志尾部找最近一条传感器数据。
+///
+/// 返回 (日志里共几条, 那条的 hp, 距今多少秒)。一条都没有就返回 None。
+///
+/// 只读文件尾部若干 KB —— latest.log 动辄几十 MB，全读一遍要几百毫秒，
+/// 而 probe 是要给人看结果的东西，不能卡。
+fn sensor_activity(path: &std::path::Path) -> Option<(usize, f32, u64)> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    const TAIL: usize = 512 * 1024;
+
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let start = len.saturating_sub(TAIL as u64);
+    f.seek(SeekFrom::Start(start)).ok()?;
+
+    let mut buf = Vec::with_capacity(TAIL);
+    f.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf);
+
+    let mut total = 0usize;
+    let mut last: Option<(f32, u64)> = None;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    for line in text.lines() {
+        // 只认慢通道的完整行（带 hp=）。空壳 <TRIT> 是玩家手打的，不算。
+        let Some(ev) = trit_agent::perceive::classify(line) else {
+            continue;
+        };
+        let trit_agent::perceive::LogEvent::Sensor(p) = ev else {
+            continue;
+        };
+        if p.fast {
+            continue;
+        }
+        total += 1;
+        if let Some(hp) = p.hp {
+            // 从行首时间戳 [HH:MM:SS] 算这条有多旧
+            let age = parse_log_age_secs(line, now);
+            last = Some((hp, age));
+        }
+    }
+    last.map(|(hp, age)| (total, hp, age))
+}
+
+/// 从日志行首的 `[HH:MM:SS]` 算出这条日志距今多少秒。
+///
+/// 跨天的情况按「今天早些时候」处理，最多 24h —— 只用于给个量级，
+/// 不需要精确到秒。
+fn parse_log_age_secs(line: &str, now: u64) -> u64 {
+    let Some(rest) = line.strip_prefix('[') else {
+        return 0;
+    };
+    let Some(end) = rest.find(']') else {
+        return 0;
+    };
+    let t = &rest[..end];
+    let mut it = t.split(':');
+    let (Some(h), Some(m), Some(s)) = (it.next(), it.next(), it.next()) else {
+        return 0;
+    };
+    let (Ok(h), Ok(m), Ok(s)) = (h.parse::<u64>(), m.parse::<u64>(), s.parse::<u64>()) else {
+        return 0;
+    };
+    let secs = h * 3600 + m * 60 + s;
+
+    // 用本机的当天秒数做基准：日志时间是「本地当天几点几分」。
+    let local = now - (now % 86400);
+    let today = local + secs;
+    if today > now {
+        today.saturating_sub(86400) .max(0)
+    } else {
+        now - today
+    }
 }
 
 // ---------------------------------------------------------------- run
