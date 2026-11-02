@@ -177,6 +177,40 @@ pub struct Agent {
     /// 累计进入暂停的次数，跑完打印出来
     pub bg_pauses: u64,
     next_badge_ms: u64,
+    /// 窗口存活检测的下次检查时刻。
+    next_alive_ms: u64,
+    /// 外部停机信号的下次检查时刻。
+    next_stop_ms: u64,
+    /// 启动时是否抢焦点。
+    ///
+    /// 前台模式（双击 bat）要抢 —— 你刚双击完，焦点还在黑窗口上，
+    /// 不抢的话 AI 的按键全打到控制台。
+    /// **后台守护必须不抢** —— 它是常驻的，抢焦点意味着你正在写代码
+    /// 时窗口被游戏抢走。所以这个开关由调用方决定。
+    pub grab_focus_on_start: bool,
+    /// 启动时是否自动切到第三视角。
+    ///
+    /// 同样由调用方决定：守护进程在你不玩的时候切视角等于乱动你的镜头。
+    pub switch_view_on_start: bool,
+    /// 窗口消失（游戏被关 / 崩了）时是否结束本轮。
+    ///
+    /// 守护进程靠它回到「等窗口」循环重新挂上；前台模式则应该退出，
+    /// 不然它会一直对一个死句柄注入按键。
+    pub stop_when_window_gone: bool,
+    /// 接管状态变化时的回调。
+    ///
+    /// 用 `Option<Box<dyn FnMut(bool)>>` 而不是裸指针，是为了能捕获环境
+    /// （日志路径等）。回调在每次接管/交还时触发；用
+    /// [`Self::clear_arm_listener`] 可以取消。
+    pub on_arm_change: Option<Box<dyn FnMut(bool)>>,
+    /// 外部问「该不该停」。
+    ///
+    /// 后台守护进程靠它把停机信号（`trit-agent stop`）接进**主循环**。
+    /// 不接的话有个很坑的表现：守护进程一挂上游戏窗口就整个卡在
+    /// `agent.run()` 里（那是一整局游戏的时长），停机信号只有外层
+    /// 「等窗口」那个循环会查 —— 也就是说**游戏开着的时候 `stop`
+    /// 完全没用**，命令说「已请求退出」，进程还在跑。
+    pub should_stop: Option<Box<dyn FnMut() -> bool>>,
 }
 
 impl Agent {
@@ -252,6 +286,13 @@ impl Agent {
             paused_bg: false,
             bg_pauses: 0,
             next_badge_ms: 0,
+            next_alive_ms: 0,
+            next_stop_ms: 0,
+            grab_focus_on_start: true,
+            switch_view_on_start: true,
+            stop_when_window_gone: false,
+            on_arm_change: None,
+            should_stop: None,
             cfg,
         }
     }
@@ -273,10 +314,41 @@ impl Agent {
             // 下一帧就是「人手和 AI 抢键盘」。
             self.release_all();
         }
+        // 接管状态变了。回调让上层能记日志 ——
+        // 后台守护进程没有控制台，窗口标题又被全屏盖住，
+        // 「AI 到底接管了没」只能靠日志回答。
+        //
+        // 先 `mem::take` 出来再调用、再放回去：回调本身就在 `self` 里，
+        // 不取出来就没法在持有 `&mut self` 的同时调用它。
+        if let Some(mut cb) = self.on_arm_change.take() {
+            cb(on);
+            // 放回去，让下一次接管/交还也能通知。
+            // 上层随时可以 `take()` 掉它来取消监听。
+            if self.on_arm_change.is_none() {
+                self.on_arm_change = Some(cb);
+            }
+        }
     }
 
     pub fn is_armed(&self) -> bool {
         self.armed
+    }
+
+    /// 取消接管状态监听。
+    pub fn clear_arm_listener(&mut self) {
+        self.on_arm_change = None;
+    }
+
+    /// 问外部「该不该停」。
+    ///
+    /// 抽成方法是为了能单测：停机信号接进主循环这件事，
+    /// 一旦被改坏，症状是「stop 命令说成功了但进程还在」，
+    /// 而且只在「游戏正开着」时才犯 —— 手工很难稳定复现。
+    fn stop_requested(&mut self) -> bool {
+        match self.should_stop.as_mut() {
+            Some(f) => f(),
+            None => false,
+        }
     }
 
     // ------------------------------------------------------------ 视角
@@ -342,6 +414,35 @@ impl Agent {
         }
     }
 
+    /// 处理一个热键。
+    ///
+    /// 抽成独立方法是为了能直接单元测试 —— 热键语义是「按 F8 就能用」
+    /// 这条需求的**核心**，必须能被自动验证，不能只靠手按。
+    ///
+    /// 语义：
+    /// - F8（kill_switch）：**切换**接管状态。闲置时按 = 接管，
+    ///   接管中按 = 交还。这是用户唯一需要记住的键。
+    /// - F9（panic）：急停，只交还不切视角。
+    /// - F6/F7：单独开关攻击 / 移动。
+    /// - F10：切视角。
+    pub fn handle_hotkey(&mut self, vk: u16) {
+        let cfg = &self.cfg;
+        if vk == cfg.kill_switch_vk {
+            let on = !self.armed;
+            self.arm(on);
+        } else if vk == cfg.panic_vk {
+            self.arm(false);
+        } else if vk == cfg.toggle_attack_vk {
+            self.toggle_channel(Channel::Attack);
+        } else if vk == cfg.toggle_move_vk {
+            let on = !self.channels[Channel::Forward.index()];
+            self.set_channel(Channel::Forward, on);
+            self.set_channel(Channel::Strafe, on);
+        } else if vk == cfg.toggle_perspective_vk {
+            self.cycle_perspective();
+        }
+    }
+
     /// F10：和游戏内 F5 同效果，但走我们自己的记账路径。
     /// 你手动按游戏 F5 会让记账漂掉，按这个不会。
     pub fn cycle_perspective(&mut self) {
@@ -354,7 +455,7 @@ impl Agent {
     }
 
     /// 把「开/关」写到窗口标题上。
-    fn update_badge(&mut self) {
+    pub fn update_badge(&mut self) {
         if !self.cfg.title_badge {
             return;
         }
@@ -1250,24 +1351,26 @@ impl Agent {
         // 日志事件缓冲，循环外建一次，之后每拍 clear 复用
         let mut log_events: Vec<LogEvent> = Vec::with_capacity(32);
 
-        let kv = self.cfg.kill_switch_vk;
-        let pv = self.cfg.panic_vk;
-        let av = self.cfg.toggle_attack_vk;
-        let mv = self.cfg.toggle_move_vk;
-        let tv = self.cfg.toggle_perspective_vk;
         let mut last_armed = self.armed;
 
         // 启动：抢焦点 → 挂状态标记 → 切到接管视角。
         // 抢不到焦点不做任何注入，否则键全打到别的窗口上。
-        if !self.input.focus() {
+        //
+        // 「抢焦点」「切视角」都做成开关：后台守护进程不能抢你的焦点，
+        // 也不该在你没玩游戏的时候乱切镜头。
+        if self.grab_focus_on_start && !self.input.focus() {
             println!(
                 "警告：没能把游戏窗口拉到前台。切回游戏后 AI 才会动手（pause_when_unfocused={}）。",
                 self.cfg.pause_when_unfocused
             );
         }
-        std::thread::sleep(Duration::from_millis(150));
+        if self.grab_focus_on_start {
+            std::thread::sleep(Duration::from_millis(150));
+        }
         self.update_badge();
-        self.sync_view();
+        if self.switch_view_on_start {
+            self.sync_view();
+        }
 
         loop {
             let now = Instant::now();
@@ -1277,21 +1380,7 @@ impl Agent {
 
             if let Some(hk) = hotkeys.as_mut() {
                 for k in hk.poll() {
-                    if k == kv {
-                        let on = !self.armed;
-                        self.arm(on);
-                    } else if k == pv {
-                        self.arm(false);
-                        break;
-                    } else if k == av {
-                        self.toggle_channel(Channel::Attack);
-                    } else if k == mv {
-                        let on = !self.channels[Channel::Forward.index()];
-                        self.set_channel(Channel::Forward, on);
-                        self.set_channel(Channel::Strafe, on);
-                    } else if k == tv {
-                        self.cycle_perspective();
-                    }
+                    self.handle_hotkey(k);
                 }
             }
 
@@ -1314,6 +1403,36 @@ impl Agent {
             if self.cfg.title_badge && now_ms >= self.next_badge_ms {
                 self.next_badge_ms = now_ms + 500;
                 self.input.refresh_badge();
+            }
+
+            // 外部停机信号（守护进程的 `trit-agent stop`）。
+            //
+            // 必须查在**主循环**里：守护进程挂上窗口后就一直待在这儿，
+            // 外层「等窗口」的循环根本轮不到。200ms 查一次足够 ——
+            // 停机不需要多快，但必须**真的会来**。
+            if now_ms >= self.next_stop_ms {
+                self.next_stop_ms = now_ms + 200;
+                // 借用在这一行结束就释放，后面才能 `&mut self`。
+                let stop = self.stop_requested();
+                if stop {
+                    println!("收到停机信号，结束本轮。");
+                    self.release_all();
+                    break;
+                }
+            }
+
+            // 窗口没了（游戏被关 / 崩了）→ 结束本轮。
+            //
+            // 不查的话会对着一个死句柄继续注入：SendInput 是系统级的，
+            // 句柄失效不代表按键落不下去 —— 表现就是「游戏关了但角色
+            // 还在往前走」，因为按键打到了别的窗口上。
+            if self.stop_when_window_gone && now_ms >= self.next_alive_ms {
+                self.next_alive_ms = now_ms + 1000;
+                if !self.input.is_alive() {
+                    println!("游戏窗口已关闭，结束本轮。");
+                    self.release_all();
+                    break;
+                }
             }
 
             // 日志不用每 tick 读，50ms 一次足够
@@ -2139,6 +2258,83 @@ mode = hold
         a.arm(true);
         assert!(a.is_armed());
         assert_eq!(a.machine.ticks, ticks_before);
+    }
+
+    /// **F8 必须能直接接管** —— 这是用户提的核心需求。
+    ///
+    /// 需求原文是「直接按F8就可以的那种」。之前 F8 语义是反的：
+    /// 前台模式一挂上窗口就 `arm(true)` 自动接管，F8 反而是「交还」。
+    /// 于是用户按 F8 看到的是「AI 松手了」，跟预期正好相反 ——
+    /// 表现出来就是「按了没反应」。
+    ///
+    /// 守护模式下 AI 初始是待命状态，F8 第一次按 = 接管。
+    #[test]
+    fn f8_takes_over_from_idle() {
+        let mut a = agent();
+        assert!(!a.is_armed(), "初始应该是待命，等 F8 来接管");
+        let vk = a.cfg.kill_switch_vk;
+        a.handle_hotkey(vk);
+        assert!(a.is_armed(), "按 F8 必须接管 —— 这是用户唯一需要记住的键");
+    }
+
+    /// 再按一次 F8 = 交还。来回切是日常操作，必须对称。
+    #[test]
+    fn f8_toggles_back_to_human() {
+        let mut a = agent();
+        let vk = a.cfg.kill_switch_vk;
+        a.handle_hotkey(vk);
+        assert!(a.is_armed());
+        a.handle_hotkey(vk);
+        assert!(!a.is_armed(), "再按一次 F8 必须交还控制权");
+    }
+
+    /// F9 急停：只交还，**不**切视角。
+    ///
+    /// 用户想在第三视角下看场面时按 F9，如果它把视角切回第一视角
+    /// 就等于「急停顺手把镜头也拽走了」。
+    #[test]
+    fn panic_key_stops_without_touching_view() {
+        let mut a = agent();
+        a.arm(true);
+        let before = a.perspective;
+        a.handle_hotkey(a.cfg.panic_vk);
+        assert!(!a.is_armed(), "F9 必须关掉 AI");
+        assert_eq!(a.perspective, before, "F9 不该动视角");
+    }
+
+    /// 接管状态变化要能通知上层（后台守护靠它写日志）。
+    #[test]
+    fn arm_change_listener_fires_on_toggle() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let sink = seen.clone();
+        let mut a = agent();
+        a.on_arm_change = Some(Box::new(move |on: bool| {
+            sink.borrow_mut().push(on);
+        }));
+        a.handle_hotkey(a.cfg.kill_switch_vk);
+        a.handle_hotkey(a.cfg.kill_switch_vk);
+        assert_eq!(*seen.borrow(), vec![true, false], "接管和交还都要通知");
+    }
+
+    /// 外部停机信号必须真的能让主循环停下来。
+    ///
+    /// 这条回归对应一个真实缺陷：守护进程把停机信号只查在「等窗口」
+    /// 那个外层循环里，游戏一开就卡在 `agent.run()` 里查不到，
+    /// 于是 `trit-agent stop` 回「已请求退出」而进程照跑不误。
+    /// 症状只在「游戏正开着」时出现，手工很难稳定复现。
+    #[test]
+    fn external_stop_signal_can_halt_the_loop() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let flag = Rc::new(Cell::new(false));
+        let sink = flag.clone();
+        let mut a = agent();
+        a.should_stop = Some(Box::new(move || sink.get()));
+        assert!(!a.stop_requested(), "没人喊停就不该停");
+        flag.set(true);
+        assert!(a.stop_requested(), "外部喊停必须传达到主循环");
     }
 
     // ---------------------------------------------------------- 战法 / 共同意识

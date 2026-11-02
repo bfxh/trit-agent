@@ -42,6 +42,15 @@ pub trait Input {
     /// 生产实现（win32）不覆盖 —— 它的前台状态是从系统真读的。
     fn set_foreground(&mut self, _on: bool) {}
 
+    /// 目标窗口是否还在（游戏没被关掉）。
+    ///
+    /// 后台守护进程靠它判断「游戏关了 / 重启了」：窗口没了就重新去找，
+    /// 而不是继续对着一个死句柄注入按键。
+    /// 默认 true（无窗口的仿真实现不需要这个概念）。
+    fn is_alive(&mut self) -> bool {
+        true
+    }
+
     /// 测试钩子：读回最近挂上的标题标记。
     fn last_badge(&self) -> Option<String> {
         None

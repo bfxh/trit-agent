@@ -80,6 +80,7 @@ unsafe extern "system" {
     fn SetWindowTextW(h: Hwnd, text: *const u16) -> i32;
     fn GetClassNameW(h: Hwnd, buf: *mut u16, max: i32) -> i32;
     fn IsWindowVisible(h: Hwnd) -> i32;
+    fn IsWindow(h: Hwnd) -> i32;
     fn SetForegroundWindow(h: Hwnd) -> i32;
     fn GetForegroundWindow() -> Hwnd;
     fn ShowWindow(h: Hwnd, cmd: i32) -> i32;
@@ -88,7 +89,153 @@ unsafe extern "system" {
     fn SetCursorPos(x: i32, y: i32) -> i32;
     fn SetConsoleCtrlHandler(handler: Option<unsafe extern "system" fn(u32) -> i32>, add: i32) -> i32;
     fn ExitProcess(code: u32) -> !;
+    // ---- 命名对象：单实例互斥 + 停机信号 ----
+    fn CreateMutexW(attrs: *mut core::ffi::c_void, initial_owner: i32, name: *const u16) -> isize;
+    fn OpenMutexW(access: u32, inherit: i32, name: *const u16) -> isize;
+    fn CreateEventW(
+        attrs: *mut core::ffi::c_void,
+        manual_reset: i32,
+        initial_state: i32,
+        name: *const u16,
+    ) -> isize;
+    fn OpenEventW(access: u32, inherit: i32, name: *const u16) -> isize;
+    fn SetEvent(h: isize) -> i32;
+    fn WaitForSingleObject(h: isize, ms: u32) -> u32;
+    fn CloseHandle(h: isize) -> i32;
+    fn GetLastError() -> u32;
 }
+
+/// 命名对象句柄。0 = 无效。
+pub type Handle = isize;
+
+/// `GetLastError` 的「对象已存在」。
+const ERROR_ALREADY_EXISTS: u32 = 183;
+/// `WaitForSingleObject` 的「信号已置位」。
+const WAIT_OBJECT_0: u32 = 0;
+/// `WaitForSingleObject` 的「超时」。
+const WAIT_TIMEOUT: u32 = 258;
+/// `EVENT_MODIFY_STATE`
+const EVENT_MODIFY_STATE: u32 = 0x0002;
+/// `SYNCHRONIZE` —— 等待/查询对象状态所需的最小权限。
+///
+/// 互斥量**不能**用 `EVENT_MODIFY_STATE`（那是事件的权限位）：
+/// 拿错权限会让 `OpenMutexW` 直接失败，于是「进程明明在跑，
+/// 但状态查询说没跑」—— 排查时极具误导性。
+const SYNCHRONIZE: u32 = 0x0010_0000;
+
+/// 把 &str 编成 UTF-16（带结尾的 0）。
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// 创建一个命名互斥量。返回 `(句柄, 是否此前已存在)`。
+///
+/// 「已存在」= 已经有另一个实例在跑。后台守护靠它保证全局只有一个，
+/// 否则两个进程同时轮询 F8，**按一次会被切换两次 = 看起来毫无反应**。
+pub fn create_named_mutex(name: &str) -> Option<(Handle, bool)> {
+    let w = wide(name);
+    let h = unsafe { CreateMutexW(std::ptr::null_mut(), 1, w.as_ptr()) };
+    if h == 0 {
+        return None;
+    }
+    let existed = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
+    Some((h, existed))
+}
+
+/// 打开一个已存在的命名互斥量。`None` = 没有这个对象。
+pub fn open_named_mutex(name: &str) -> Option<Handle> {
+    let w = wide(name);
+    let h = unsafe { OpenMutexW(SYNCHRONIZE, 0, w.as_ptr()) };
+    if h == 0 {
+        None
+    } else {
+        Some(h)
+    }
+}
+
+/// 创建一个命名事件（**手动复位**）。
+///
+/// 手动复位是刻意的，不是随手写的：停机信号必须「粘住」。
+/// `WaitForSingleObject` 碰到手动复位事件**不会**把它清掉，
+/// 所以谁查都是「已置位」。
+///
+/// 用自动复位（Windows 的默认）会出事：信号会被**第一个等待者吃掉**。
+/// 而停机信号有**两个**查询点 —— 主循环里查一次，外层循环再查一次。
+/// 自动复位下第二次查就是「未置位」，于是守护进程收到停机信号后
+/// 反而 exit 不掉，退回去继续等窗口 —— 表现是「stop 说成功了，进程还在」。
+pub fn create_named_event(name: &str) -> Option<Handle> {
+    let w = wide(name);
+    // manual_reset = 1（手动复位），initial_state = 0（初始未置位）
+    let h = unsafe { CreateEventW(std::ptr::null_mut(), 1, 0, w.as_ptr()) };
+    if h == 0 {
+        None
+    } else {
+        Some(h)
+    }
+}
+
+/// 打开一个已存在的命名事件，用来给它置位。
+pub fn open_named_event(name: &str) -> Option<Handle> {
+    let w = wide(name);
+    let h = unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, w.as_ptr()) };
+    if h == 0 {
+        None
+    } else {
+        Some(h)
+    }
+}
+
+/// 给事件置位（通知另一个进程）。
+pub fn signal_event(h: Handle) -> bool {
+    unsafe { SetEvent(h) != 0 }
+}
+
+/// 事件是否已经置位。
+///
+/// 对**手动复位**事件这是纯查询：`WaitForSingleObject` 不会清掉置位状态，
+/// 所以查多少次都是同一个答案（这一点是停机信号能用的前提）。
+pub fn event_is_signaled(h: Handle) -> bool {
+    unsafe { WaitForSingleObject(h, 0) == WAIT_OBJECT_0 }
+}
+
+/// 关闭句柄。
+pub fn close_handle(h: Handle) {
+    if h != 0 {
+        unsafe { CloseHandle(h) };
+    }
+}
+
+/// 强制松开「我们可能按住」的键。
+///
+/// 用途：进程被强杀（任务管理器）时，注入的 key-down 会留在系统键盘
+/// 状态里 —— 角色会一直往前走。新进程启动时先无条件松一遍，
+/// 把上一次崩溃留下的状态清掉。
+pub fn release_known_keys() {
+    const KEYS: &[u16] = &[
+        0x57, // W
+        0x41, // A
+        0x53, // S
+        0x44, // D
+        0x20, // 空格
+        0x10, // Shift
+        0xA0, // LShift
+        0xA1, // RShift
+    ];
+    for &vk in KEYS {
+        send_key(vk, false);
+    }
+    send_mouse(0, 0, MOUSEEVENTF_LEFTUP | MOUSEEVENTF_RIGHTUP);
+}
+
+/// 等待某个事件被置位，返回 true 表示收到了。
+///
+/// 超时返回 false —— 这样调用方还能顺便检查别的退出条件。
+pub fn wait_event(h: Handle, ms: u32) -> bool {
+    unsafe { WaitForSingleObject(h, ms) == WAIT_OBJECT_0 }
+}
+
+/// `WaitForSingleObject` 的超时常量。
+pub const TIMEOUT: u32 = WAIT_TIMEOUT;
 
 /// 全局按住状态：Ctrl+C 退出时用它把键全部松开，避免角色永远往前跑。
 fn held() -> &'static Mutex<BTreeSet<u16>> {
@@ -394,6 +541,15 @@ impl Input for Win32Input {
         }
         send_mouse(dx, dy, MOUSEEVENTF_MOVE);
         self.sent += 1;
+    }
+
+    fn is_alive(&mut self) -> bool {
+        // 句柄还有效 = 游戏窗口还在。
+        //
+        // 句柄失效后 GetForegroundWindow 之类会拿一个野指针去比，
+        // 而 SendInput 更会照打不误 —— 后台守护必须知道窗口没了，
+        // 好赶紧松手重找，别对着空气按 W。
+        unsafe { IsWindow(self.hwnd) != 0 }
     }
 
     fn button(&mut self, b: Button, down: bool) {

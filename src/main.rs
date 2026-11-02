@@ -29,12 +29,42 @@ fn main() {
         "sim" => sim(&flags),
         "probe" => probe(&flags),
         "run" => run(&flags),
+        "stop" => stop_daemon(),
+        "status" => daemon_status(),
         "init" => init(&flags),
         "help" | "-h" | "--help" => help(),
         _ => {
             eprintln!("未知命令: {cmd}\n");
             help();
         }
+    }
+}
+
+/// 请求后台守护进程退出。
+fn stop_daemon() {
+    #[cfg(windows)]
+    {
+        if trit_agent::daemon::request_stop() {
+            println!("已请求守护进程退出。");
+        } else {
+            println!("守护进程没在跑（或者已经退出了）。");
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        println!("后台守护只在 Windows 上可用。");
+    }
+}
+
+/// 打印守护进程状态。
+fn daemon_status() {
+    #[cfg(windows)]
+    {
+        std::process::exit(trit_agent::daemon::print_status());
+    }
+    #[cfg(not(windows))]
+    {
+        println!("后台守护只在 Windows 上可用。");
     }
 }
 
@@ -64,16 +94,29 @@ fn help() {
   trit-agent probe [--config path] [--profile <整合包目录>]
   trit-agent run   [--config path] [--seconds N] [--hz N] [--mode hold|patrol|follow]
                    [--profile <整合包目录>] [--window 关键字] [--log path]
+  trit-agent status                           后台守护进程状态
+  trit-agent stop                             停掉后台守护进程
   trit-agent init                             生成默认配置文件
 
+★ 想要「进游戏直接按 F8 就能用」：
+  双击 安装后台.bat 装一次（开机自启、后台运行、不弹窗口）。
+  之后进游戏按 F8 接管、再按 F8 交还，全程不用开任何窗口。
+  状态: trit-agent status    停掉: trit-agent stop
+  卸载: 双击 卸载后台.bat
+
 热键（运行中，全局有效）:
-  F8   开关 AI —— ★ 一键交还控制权，再按一下重新接管
+  F8   开关 AI —— ★ 闲置时按 = 接管，接管中按 = 交还
        关掉时会：立刻松开所有键 → 切回第一视角 → 标题变成 [AI 待机]
   F9   急停 —— 关掉 AI，但不切视角（想保持第三视角看场面时用）
   F10  切视角（第一 → 第三背视 → 第三前视 → 循环）
        和游戏内 F5 同效，但走 agent 自己的账面，AI 关着也能按
   F6   单独关/开「攻击」这一项
   F7   单独关/开「移动」这一项
+
+热键是**全局**的（GetAsyncKeyState 轮询），不看焦点 ——
+  游戏全屏、鼠标在别的窗口上都照样能用。
+  但**必须有进程在跑**才有人监听：没启动就按 F8，当然没反应。
+  这就是后台守护进程存在的理由。
 
 第三视角:
   接管时自动切到第三视角（默认背视）。切法是「按满一圈归零再走到目标」，
@@ -969,6 +1012,42 @@ fn run(flags: &Flags) {
 
         begin_high_res_timer();
         trit_agent::act::win32::install_panic_handler();
+
+        // ---- 单实例：全局只允许一个进程在监听 F8 ----
+        //
+        // 两个进程同时轮询 F8 会怎样？按一次 F8，A 进程切成「接管」，
+        // B 进程也切成「接管」—— 但它们各自往游戏里注入按键，
+        // 而「接管」是布尔开关……真正的坑是：两个进程都在往同一个
+        // 窗口发按键，一个在按 W 往前走，另一个可能在按 S 往后退，
+        // 或者一个认为该攻击、另一个认为该防守，**互相打架**。
+        //
+        // 更常见的情况是：后台守护在跑（开机自启），你又双击了 bat，
+        // 于是「按 F8 没反应」—— 因为按一次被两个进程各切一次，
+        // 等于切了两次 = 回到原状。
+        //
+        // 所以：守护进程在跑时，前台模式直接提示「按 F8 即可」然后退出，
+        // 绝不两个一起监听。
+        if trit_agent::daemon::is_running() {
+            println!(
+                "后台守护进程已经在运行了 —— **直接在游戏里按 F8 就能接管**。\n\
+                 守护进程是开机自启的，不需要再开这个窗口。\n\
+                 （想停掉守护进程：trit-agent.exe stop）"
+            );
+            end_high_res_timer();
+            std::process::exit(0);
+        }
+        let (mutex, existed) = match trit_agent::act::win32::create_named_mutex(
+            trit_agent::daemon::TRIT_AGENT_MUTEX,
+        ) {
+            Some(m) => m,
+            None => (0, false),
+        };
+        if existed {
+            println!("已经有另一个实例在监听热键了，退出。");
+            end_high_res_timer();
+            std::process::exit(0);
+        }
+        let _keep_mutex = mutex; // 活到函数结束，句柄不关
 
         // 等窗口，别一找不到就退出。
         //

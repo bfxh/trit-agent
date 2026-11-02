@@ -17,6 +17,8 @@ pub mod act;
 pub mod agent;
 pub mod behaviors;
 pub mod config;
+#[cfg(windows)]
+pub mod daemon;
 pub mod fsm;
 pub mod gather;
 pub mod npc;

@@ -1,20 +1,31 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-title trit-agent - 保持这个窗口开着，F8 才有反应
+title trit-agent - 前台模式（临时用）
 
 echo.
-echo   AI 控制台
-echo   ---------
-echo   F8   交还 / 重新接管       F9   急停
-echo   F10  切视角                F6/F7 单关攻击/移动
-echo.
-echo   关掉这个窗口 = AI 彻底停止（F8 也不会有反应）
+echo   AI 控制台（前台模式）
+echo   -------------------
+echo   F8   开关 AI —— 按一下接管 / 再按一下交还
+echo   F9   急停              F10  切视角
+echo   F6/F7 单关攻击/移动
 echo.
 
-REM ---- 预检：先跑一次 probe，把「能不能用」讲清楚再进主循环 ----
-REM 这一步很值钱：以前「AI 不动」只能靠猜到底是没接管、没感知、
-REM 还是数据包没启用。现在直接报。
+REM ---- 后台守护优先 ----
+REM 守护进程（开机自启）已经在跑的话，就别开第二个 —— 两个进程同时
+REM 轮询 F8 会互相抵消（按一次被切两次 = 看起来毫无反应）。
+target\release\trit-agent.exe status 2>nul | findstr /C:"运行中" >nul
+if not errorlevel 1 (
+    echo   [提示] 后台守护进程已经在运行。
+    echo          直接进游戏按 F8 就行，不用开这个窗口。
+    echo.
+    echo   想用前台模式请先停掉守护:
+    echo       target\release\trit-agent.exe stop
+    echo.
+    pause
+    exit /b 0
+)
+
 echo   [预检] 正在检查窗口和传感器...
 echo.
 target\release\trit-agent.exe probe
