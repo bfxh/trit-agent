@@ -361,14 +361,28 @@ unsafe extern "system" fn enum_cb(h: Hwnd, lparam: isize) -> i32 {
     }
     let mut cbuf = [0u16; 64];
     let cn = unsafe { GetClassNameW(h, cbuf.as_mut_ptr(), cbuf.len() as i32) };
+    // **两处都必须 clamp 到实际缓冲区长度。**
+    //
+    // 实测（`target/probe_size.rs`）：`GetClassNameW` 在缓冲区不够时
+    // 返回的是**实际拷贝数**（buf16 对 24 字符的类名返回 15），
+    // 不是 MSDN 说的「所需长度」—— 所以在当前系统上不会越界。
+    //
+    // 但 MSDN 的措辞是「返回值可能大于 nSize」，不同 Windows 版本/
+    // 不同窗口的实现未必一致。一旦返回了 > 缓冲区长度，
+    // `cbuf[..cn]` 就是**越界切片 → panic**。
+    //
+    // 而守护进程是 GUI 子系统 + panic=abort —— 这种 panic 表现为
+    // **进程无声无息地消失**，日志里什么都不留。
+    // 代价是两次 `min()`，收益是彻底消除这条静默死亡路径。
     let class = if cn > 0 {
-        String::from_utf16_lossy(&cbuf[..cn as usize])
+        let take = (cn as usize).min(cbuf.len() - 1);
+        String::from_utf16_lossy(&cbuf[..take])
     } else {
         String::new()
     };
     out.push(WindowInfo {
         hwnd: h,
-        title: String::from_utf16_lossy(&buf[..n as usize]),
+        title: String::from_utf16_lossy(&buf[..(n as usize).min(buf.len() - 1)]),
         class,
     });
     1
@@ -509,7 +523,9 @@ fn window_title_of(h: Hwnd) -> String {
     if n <= 0 {
         return String::new();
     }
-    String::from_utf16_lossy(&buf[..n as usize])
+    // clamp 到缓冲区（理由同 enum_cb）：返回值一旦超过缓冲区就是越界 panic，
+    // 而守护进程里的 panic = 静默死亡。
+    String::from_utf16_lossy(&buf[..(n as usize).min(buf.len() - 1)])
 }
 
 fn set_window_title(h: Hwnd, text: &str) {

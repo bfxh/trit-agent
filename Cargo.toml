@@ -18,4 +18,17 @@ path = "src/main.rs"
 opt-level = 3
 lto = true
 codegen-units = 1
-panic = "abort"
+# **必须是 unwind，不能是 abort。**
+#
+# 守护进程是 GUI 子系统（没有控制台），panic 消息在 stderr 上无处可打。
+# 如果是 `abort`，一次 panic = 进程直接消失 + 零日志 =
+# 用户只看到「按 F8 没反应」，排查的人只能靠猜。
+#
+# `unwind` 让我们能：
+#   1. 用 panic hook 把现场写进日志文件（唯一的目击者）；
+#   2. 用 catch_unwind 把 panic 挡在循环外 —— 哪怕某一轮跑炸了，
+#      守护进程照样活着，F8 继续有效。
+#
+# 代价是二进制略大、panic 路径略慢 —— 对一个 200Hz 轮询的守护进程
+# 完全无所谓，而「常驻不出事」是用户明确要的。
+panic = "unwind"
