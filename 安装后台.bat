@@ -23,7 +23,7 @@ if not exist target\release\trit-agent-daemon.exe (
 target\release\trit-agent-daemon.exe --install
 if errorlevel 1 (
     echo.
-    echo   [失败] 安装没成功，看日志: target\release\trit-agent-daemon.log
+    echo   [失败] 安装没成功，看日志: %LOCALAPPDATA%\trit-agent\trit-agent-daemon.log
     echo.
     pause
     exit /b 1
