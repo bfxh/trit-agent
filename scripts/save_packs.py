@@ -28,8 +28,8 @@ TAG_END, TAG_BYTE, TAG_SHORT, TAG_INT, TAG_LONG = 0, 1, 2, 3, 4
 TAG_FLOAT, TAG_DOUBLE, TAG_BYTE_ARRAY, TAG_STRING = 5, 6, 7, 8
 TAG_LIST, TAG_COMPOUND, TAG_INT_ARRAY, TAG_LONG_ARRAY = 9, 10, 11, 12
 
-# 只有资源包、没有 data/ 的那几个：别当数据包装
-RESOURCE_PACKS = {"summoner_lang"}
+# 资源包（没有 data/ 的）单独处理，不进 datapacks/。当前状态机工程无资源包。
+RESOURCE_PACKS: set[str] = set()
 
 
 class Reader:
@@ -156,7 +156,7 @@ def patches(profile: pathlib.Path) -> list[tuple[str, pathlib.Path]]:
 def custom_packs(world_dir: pathlib.Path) -> list[str]:
     """存档里真正能当数据包用的 zip。
 
-    `summoner_lang` 是资源包（只有 assets/），放进 datapacks 只会多个空包，
+    资源包（只有 assets/、没有 data/）放进 datapacks 只会多个空包，
     还会在日志里留一行警告，所以这里直接滤掉。
     """
     dp = world_dir / "datapacks"

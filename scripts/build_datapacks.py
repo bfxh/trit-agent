@@ -16,11 +16,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import pathlib
 import re
 import shutil
-import subprocess
 import sys
 import zipfile
 
@@ -33,10 +31,8 @@ DATA_PACK_FORMAT = 9
 # 资源包 pack_format：1.18.2 是 8
 RESOURCE_PACK_FORMAT = 8
 
-# 起源校验要用到模组目录，默认跟 validate_origins.py 保持一致
-DEFAULT_MODS = r"E:/MC/MC/profiles/烦人的村民/mods"
-
-RESOURCE_PACKS = {"summoner_lang", "origins_zh"}
+# 起源资源包（summoner_lang / origins_zh）已隔离到 archive/origins/，不再随状态机打包
+RESOURCE_PACKS: set[str] = set()
 
 
 def validate_json(zf: zipfile.ZipFile) -> None:
@@ -191,28 +187,6 @@ def validate_nbt_paths(name: str) -> list[str]:
                  if ln.strip() and not ln.lstrip().startswith("#")]
         scan(lines)
 
-    # power 里的 execute_command 也是一条命令序列
-    for p in data.rglob("*.json"):
-        try:
-            j = json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        cmds: list[str] = []
-
-        def walk(o) -> None:
-            if isinstance(o, dict):
-                if o.get("type") == "origins:execute_command" and isinstance(o.get("command"), str):
-                    cmds.append(o["command"])
-                for v in o.values():
-                    walk(v)
-            elif isinstance(o, list):
-                for v in o:
-                    walk(v)
-
-        walk(j)
-        if cmds:
-            rel = p.relative_to(data)
-            scan([(f"{rel}[cmd{i}]", c) for i, c in enumerate(cmds, 1)])
     return problems
 
 
@@ -450,21 +424,6 @@ def main() -> None:
     if not ok:
         print("\n有数据包格式不对，别装。")
         sys.exit(1)
-
-    # 起源包要按「模组真实注册的类型」校验一遍：Apoli 解析失败是静默的，
-    # 表现出来是「起源选得到但技能栏空着」，或者列表里干脆没有这个种族。
-    if "summoner_origin" in names:
-        print()
-        script = ROOT / "scripts" / "validate_origins.py"
-        mods = pathlib.Path(os.environ.get("TRIT_MODS", DEFAULT_MODS))
-        if not mods.is_dir():
-            print(f"起源校验跳过：模组目录不存在（{mods}）")
-        else:
-            rc = subprocess.run([sys.executable, str(script), "--mods", str(mods),
-                                 "--pack", str(SRC / "summoner_origin")]).returncode
-            if rc != 0:
-                print("  起源包校验没过，先修再装。")
-                sys.exit(rc)
 
     if args.install:
         profile = pathlib.Path(args.install)

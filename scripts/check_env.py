@@ -24,7 +24,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import save_packs as sp  # noqa: E402  复用 NBT 读取
 
-PACKS = ["squad.zip", "summoner_origin.zip", "trit_bridge.zip"]
+PACKS = ["squad.zip", "trit_bridge.zip"]  # 状态机数据包；起源包已隔离到 archive/origins/
 # 自带剧情脚本的教学存档，故意不往里塞东西，别当成故障
 SKIP_SAVES = {"新手教程"}
 DEFAULT_PROFILE = pathlib.Path(r"E:/MC/MC/profiles/烦人的村民")
@@ -121,9 +121,16 @@ def check_saves(r: Report, profile: pathlib.Path) -> None:
             r.fail(f"{tag}: datapacks/ 里缺 {', '.join(missing)}",
                    "python scripts/build_datapacks.py --install <实例>")
         elif off:
-            r.fail(f"{tag}: 包在但没启用 {', '.join(off)}",
-                   f'python scripts/save_packs.py enable "{profile.as_posix()}" --save "{w.name}"'
-                   "（游戏必须先退出）")
+            # 两条路：游戏没跑 -> 改 level.dat；游戏在跑 -> 走游戏内命令，
+            # 因为运行期改 level.dat 会被退出时的存档整个覆盖写回。
+            if game_running():
+                hint = ("在游戏里敲："
+                        + "  ".join(f'/datapack enable "file/{p}"' for p in off)
+                        + "（或退出游戏后跑 python scripts/fix_world.py）")
+            else:
+                hint = (f'python scripts/fix_world.py --save "{w.name}"'
+                        "（游戏已关，会直接改 level.dat）")
+            r.fail(f"{tag}: 包在但没启用 {', '.join(off)}", hint)
         elif conflict:
             r.fail(f"{tag}: Enabled 和 Disabled 撞了 {', '.join(conflict)}",
                    "Disabled 里还有同名条目，写启用也没用")
@@ -132,67 +139,6 @@ def check_saves(r: Report, profile: pathlib.Path) -> None:
                    "AI 发的 /function 会被服务器直接拒掉")
         else:
             r.ok(f"{tag}: 三个包都在且已启用")
-
-
-def check_lang(r: Report, profile: pathlib.Path) -> None:
-    print("\n[3] 汉化")
-    mods = profile / "mods"
-    plus = [p for p in mods.glob("*.jar") if "origins-plus-plus" in p.name]
-    core = [p for p in mods.glob("origins-forge*.jar")]
-    # 起源++ 2.0-forge 在 1.18.2 上结构性不兼容（用了 1.19 才有的
-    # origins:modify_resource 动作和 minecraft:warden 实体），登录握手时
-    # Calio 同步注册表会抛 ConcurrentModificationException，服务器随即踢线。
-    # 所以「移进 mods_disabled/」是一种**正确状态**，不能当成故障报出来 ——
-    # 否则每跑一次自检都一个红叉，真出问题时反而看不见了。
-    disabled = [p for p in (profile / "mods_disabled").glob("*origins-plus-plus*")] \
-        if (profile / "mods_disabled").is_dir() else []
-    if not plus and disabled:
-        r.ok(f"起源++ 已移出 mods（{len(disabled)} 份躺在 mods_disabled/）—— "
-             f"1.18.2 上不兼容，这是有意禁用")
-    elif not plus:
-        r.fail("mods 和 mods_disabled 里都没有 origins-plus-plus", "它要么该启用，"
-               "要么该明确移出；现在是丢了")
-    else:
-        z = zipfile.ZipFile(plus[0])
-        rel = "assets/origins-plus-plus/lang/zh_cn.json"
-        en = json.loads(z.read("assets/origins-plus-plus/lang/en_us.json").decode("utf-8-sig"))
-        if rel not in z.namelist():
-            r.fail(f"{plus[0].name} 里没有 zh_cn.json", "python scripts/make_origins_zh.py "
-                   f'--mods "{mods.as_posix()}" --inject')
-        else:
-            zh = json.loads(z.read(rel).decode("utf-8"))
-            miss = [k for k in en if k not in zh]
-            nozh = [k for k, v in zh.items()
-                    if not re.search(r"[\u4e00-\u9fff]", str(v))]
-            if miss or nozh:
-                r.warn(f"起源++ 缺 {len(miss)} 条，{len(nozh)} 条没汉字",
-                       "重跑 make_origins_zh.py --inject")
-            else:
-                r.ok(f"起源++ 词条 {len(zh)} / {len(en)} 全中文（已写进 jar，无需启用资源包）")
-    if core:
-        z = zipfile.ZipFile(core[0])
-        rel = "assets/origins/lang/zh_cn.json"
-        zh = json.loads(z.read(rel).decode("utf-8-sig"))
-        nozh = [k for k, v in zh.items() if not re.search(r"[\u4e00-\u9fff]", str(v))]
-        if nozh:
-            r.warn(f"起源本体仍有 {len(nozh)} 条英文：{nozh[:3]}")
-        else:
-            r.ok(f"起源本体 {len(zh)} 条全中文")
-
-    opts = profile / "options.txt"
-    if opts.is_file():
-        text = opts.read_text(encoding="utf-8", errors="replace")
-        m = re.search(r"^resourcePacks:(.*)$", text, re.M)
-        if m and "origins_zh" in m.group(1):
-            r.ok("origins_zh 资源包已在 options.txt 里启用（双保险）")
-        else:
-            # 起源++ 已移出时，origins_zh 里那批译文根本没有对应的命名空间，
-            # 启用与否都无所谓。别在这种时候还催人去启用。
-            if plus:
-                r.warn("origins_zh 资源包没在 options.txt 里启用",
-                       "不影响：译文已经写进 jar。只有模组更新覆盖 jar 时才需要它")
-            else:
-                r.ok("origins_zh 资源包未启用（起源++ 已移出，这批译文暂无对应内容）")
 
 
 def check_sensors(r: Report, profile: pathlib.Path) -> None:
@@ -219,63 +165,108 @@ def check_sensors(r: Report, profile: pathlib.Path) -> None:
         r.ok(f"{seen} 个数据包 pack_format 全部 = 9")
 
 
+def check_mod_tags(r: Report, profile: pathlib.Path) -> None:
+    """[5] 模组 function 标签的坏引用 —— 静默废掉整个标签的隐形杀手。
 
-def check_origins(r: Report, profile: pathlib.Path) -> None:
-    """起源数据包：类型名/必填字段/引用，按模组真实注册表校验。
+    MC 1.18 的标签加载是 **all-or-nothing**：`minecraft:tick` 里只要有一个条目
+    指向不存在的函数，**整个标签就作废**，挂在上面的所有 tick 函数一个都不跑，
+    而且**只打一行 ERROR，不报「你的功能没生效」**。
 
-    查的是**装进存档的那一份 zip**，不是仓库里的源目录 —— 免得「本地改好了
-    但没重新打包」这种情况被漏掉。
+    这就是本项目踩过的最隐蔽的一个坑：整合包里有个 epicfight 改名时漏改引用的
+    jar，它的 tick.json 引用了一个不存在的函数，于是 `minecraft:tick` 整体作废
+    -> 我们的 trit_bridge:tick 从来没跑过 -> 传感器一行都不吐 -> AI 永远
+    `hp=?` -> 按三值原则站桩。表现是「AI 不动」，真因在三个文件之外。
+
+    这里扫一遍所有模组 jar 的 function 标签，把「引用了不存在的东西」揪出来。
     """
-    print()
-    print("[5] 起源数据包")
-    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-    try:
-        import validate_origins as vo
-    except Exception as e:
-        r.warn(f"校验器加载失败: {e}")
-        return
+    print("\n[5] 模组标签完整性")
     mods = profile / "mods"
     if not mods.is_dir():
         r.warn(f"没有 mods 目录（{mods}），跳过")
         return
 
-    seen: dict[str, pathlib.Path] = {}
-    for w in sorted((profile / "saves").iterdir()):
-        p = w / "datapacks" / "summoner_origin.zip"
-        if p.is_file():
-            seen.setdefault(hash(p.read_bytes()), p)
-    if not seen:
-        r.fail("没有任何存档里有 summoner_origin.zip", "跑 build_datapacks.py --install")
-        return
-
-    groups = vo.registries(mods)
-    known = groups.pop("（合计）")
-    harvested, global_files = vo.harvest(mods)
-    known |= harvested
-
-    problems = 0
-    for p in seen.values():
-        files = vo.load_pack(p)
-        own_ns = {rel.split("/")[1] for rel in files if rel.startswith("data/")}
-        names = set(files)
-        bad: list[str] = []
-        for rel, d in files.items():
-            if not isinstance(d, dict) or "/tags/" in rel:
+    # 先收集「所有已存在的函数」：jar 里的 .mcfunction + 数据包里的。
+    # 命名空间级判定（函数是否存在）足够定位这类坏引用。
+    existing: set[str] = set()
+    # 哪些命名空间是「整个整合包共用一套」的，无法按命名空间判存在性。
+    # 模组常用 'modid' 或 'forge' 之类的通用命名空间，出现即视为存在。
+    loose_ns: set[str] = set()
+    jars = sorted(mods.glob("*.jar"))
+    for j in jars:
+        try:
+            z = zipfile.ZipFile(j)
+        except Exception:
+            continue
+        for n in z.namelist():
+            if n.startswith("data/") and n.endswith("/functions/") :
                 continue
-            if "/origin_layers/" in rel:
-                vo.check_layer(rel, d, bad, names, own_ns)
-            elif "/powers/" in rel:
-                vo.check_power(rel, d, known, bad, [])
-            elif "/origins/" in rel:
-                vo.check_origin(rel, d, bad, [], names, own_ns, global_files)
-        if bad:
-            problems += len(bad)
-            for b in bad[:5]:
-                r.fail(f"{p.parent.parent.name}: {b}")
-        else:
-            r.ok(f"起源包校验通过（{len(files)} 个 json；各存档共 {len(seen)} 份不同内容）")
+            if n.startswith("data/") and "/functions/" in n and n.endswith(".mcfunction"):
+                rel = n[len("data/"):-len(".mcfunction")]
+                ns, _, fn = rel.partition("/")
+                existing.add(f"{ns}:{fn}")
+                loose_ns.add(ns)
+            elif n.startswith("data/") and "/functions/" in n and n.endswith(".mcmeta"):
+                rel = n[len("data/"):-len(".mcmeta")]
+                ns, _, fn = rel.partition("/")
+                existing.add(f"{ns}:{fn}")
+                loose_ns.add(ns)
+
+    # 数据包里定义的函数也算存在（含我们自己的补丁）
+    for w in sorted((profile / "saves").iterdir()):
+        dp = w / "datapacks"
+        if not dp.is_dir():
+            continue
+        for p in sorted(dp.glob("*.zip")):
+            try:
+                z = zipfile.ZipFile(p)
+            except Exception:
+                continue
+            for n in z.namelist():
+                if n.startswith("data/") and "/functions/" in n and n.endswith(".mcfunction"):
+                    rel = n[len("data/"):-len(".mcfunction")]
+                    ns, _, fn = rel.partition("/")
+                    existing.add(f"{ns}:{fn}")
+                    loose_ns.add(ns)
+
+    problems: list[str] = []
+    checked = 0
+    for j in jars:
+        try:
+            z = zipfile.ZipFile(j)
+        except Exception:
+            continue
+        for n in z.namelist():
+            if not (n.startswith("data/minecraft/tags/functions/") and n.endswith(".json")):
+                continue
+            tag = n[len("data/minecraft/tags/functions/"):-len(".json")]
+            try:
+                jd = json.loads(z.read(n).decode("utf-8-sig"))
+            except Exception as e:
+                problems.append(f"{j.name} 的 {tag} 标签解析失败: {e}")
+                continue
+            vals = jd.get("values", []) if isinstance(jd, dict) else []
+            checked += 1
+            for v in vals:
+                if not isinstance(v, str) or v.startswith("#"):
+                    continue  # 以 # 开头是引用别的标签，不在本次判定范围
+                ns, _, fn = v.partition(":")
+                if not fn:
+                    continue
+                if v in existing:
+                    continue
+                # 命名空间里一个函数都没有 = 这个命名空间根本不存在，
+                # 那这条引用必然解析不了（除非是运行时注册的自定义函数）。
+                if ns not in loose_ns:
+                    problems.append(
+                        f"{j.name} 的 minecraft:{tag} 标签引用了不存在的函数 {v}"
+                        f"（整个 minecraft:{tag} 标签会作废！）")
     if problems:
-        r.warn(f"共 {problems} 处，改完记得重新 build_datapacks.py 再装")
+        for p in problems[:6]:
+            r.fail(p, "要么补上这个函数，要么把该 jar 移出 mods/")
+    else:
+        r.ok(f"{checked} 个模组 function 标签引用全部有效")
+
+
 
 
 def check_proto(r, profile) -> None:
@@ -343,9 +334,8 @@ def main() -> int:
 
     check_binary(r)
     check_saves(r, profile)
-    check_lang(r, profile)
     check_sensors(r, profile)
-    check_origins(r, profile)
+    check_mod_tags(r, profile)
     check_proto(r, profile)
 
     print()

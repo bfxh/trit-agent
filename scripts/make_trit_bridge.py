@@ -180,8 +180,12 @@ def write_json(rel: str, obj) -> None:
 
 
 def hostiles_tag() -> dict:
-    """优先复用召唤师数据包里的敌对实体清单，保证两边口径一致。"""
-    src = ROOT / "datapacks" / "summoner_origin" / "data" / "summoner" / "tags" / "entity_types" / "hunt_targets.json"
+    """敌对实体标签。
+
+    若召唤师起源包（已隔离到 archive/origins）存在则复用其敌对清单，保证口径一致；
+    否则只用工程内置的原版敌对清单。无论哪种情况都能正常工作。
+    """
+    src = ROOT / "archive" / "origins" / "datapacks" / "summoner_origin" / "data" / "summoner" / "tags" / "entity_types" / "hunt_targets.json"
     mod_values: list = []
     if src.exists():
         raw = json.loads(src.read_text(encoding="utf-8"))
@@ -411,15 +415,66 @@ def main() -> None:
                  "description": "trit-agent 传感器：快慢双通道状态流，供外部读取"}
     })
 
-    write_json("data/minecraft/tags/functions/load.json", {"values": ["trit_bridge:load"]})
-    write_json("data/minecraft/tags/functions/tick.json", {"values": ["trit_bridge:tick"]})
+    # 函数标签必须带 "replace": false —— 1.18 的标签默认行为是**替换**，
+    # 不写这个字段就等于把整个 minecraft:tick / minecraft:load 清空只留我们这条，
+    # 整合包里其它模组的 tick 函数会被静默踢掉（它们的资源/行为就废了）。
+    # squad 包的同名标签也是这个规矩，两边必须一致。
+    write_json("data/minecraft/tags/functions/load.json",
+               {"replace": False, "values": ["trit_bridge:load"]})
+    write_json("data/minecraft/tags/functions/tick.json",
+               {"replace": False, "values": ["trit_bridge:tick"]})
+
+    # -----------------------------------------------------------------------
+    # 补丁：给整合包的一个坏引用填空
+    #
+    # 整合包里有 206 个 TheAnnoyingVillagers 副本，其中 (205) 的
+    # data/minecraft/tags/functions/tick.json 引用了 `annoying_villagers_use_block:cmd`，
+    # 但这个函数**在所有 206 个 jar 里都不存在**。
+    #
+    # MC 1.18 的标签加载是 all-or-nothing：任何一个条目解析失败，
+    # **整个 minecraft:tick 标签就作废**（日志：
+    #   Couldn't load tag minecraft:tick as it is missing following
+    #   references: annoying_villagers_use_block:cmd (from ...(205).jar)）
+    # 标签一作废，挂在这个标签上的 trit_bridge:tick 和 squad:tick 就都不会跑，
+    # tellraw 一行都不出 —— 于是日志里搜 TRIT 是 0 条，AI 全是 hp=?，
+    # 按三值原则「未知不猜」就站桩不动。传感器本身完全没问题，是它**没被调用**。
+    #
+    # 修法：在这里补一个同名空函数，把缺失的引用补上，标签就能正常加载。
+    # 不动整合包的任何 jar（那是别人的东西），代价只是 7 个字节。
+    # 那个引用本来就没实现，补个空壳等于「让它本来就想做的事变成什么都不做」。
+    write("data/annoying_villagers_use_block/functions/cmd.mcfunction", "\n".join([
+        "# 空函数：只为填上整合包里一个指向不存在函数的引用。",
+        "#",
+        "# TheAnnoyingVillagersByPugilist_Steve_4_28 (205).jar 的",
+        "# data/minecraft/tags/functions/tick.json 引用了本函数，但那个 jar 里",
+        "# 并没有实现它。MC 的标签加载是 all-or-nothing，坏一条 = 整个",
+        "# minecraft:tick 标签作废 = 我们的传感器 tick 也不跑 = AI 瞎。",
+        "# 本函数存在的唯一意义就是让那个引用能解析。",
+        "",
+    ]))
 
     write("data/trit_bridge/functions/load.mcfunction", "\n".join([
-        "# 首次加载：建记分板，默认关闭（聊天刷屏，开之前先想清楚）",
+        "# 首次加载：建记分板",
         "scoreboard objectives add trit_bridge dummy",
-        "scoreboard players set on trit_bridge 0",
-        "# fo = fast on。快通道默认关，由外部在动手期间打开。",
-        "scoreboard players set fo trit_bridge 0",
+        "",
+        "# 「总开关」默认打开。",
+        "#",
+        "# 默认值原来是 0，理由是「tellraw 刷聊天框」。但 AI 的感知**完全**依赖",
+        "# 这一条通道：开关一关，tellraw 一行都不出，日志里搜 TRIT 是 0 条，于是",
+        "# 墙的方位、敌人距离、脚下是什么全是 None —— 按三值原则「未知不猜」，",
+        "# AI 就站桩不动。这正是「AI 看不见墙壁 / 不自动移动」的来源。",
+        "# 刷屏的代价（每秒一行）远小于瞎掉的代价，所以默认改成开。",
+        "#",
+        "# 注意：必须用 #inited 记「已经给过默认值」，不能每次都 `set on 1` ——",
+        "# 否则你手动关掉以后，一次 /reload 就又给打开了，看着像设置没生效。",
+        "execute unless score #inited trit_bridge matches 1 run scoreboard players set on trit_bridge 1",
+        "scoreboard players set #inited trit_bridge 1",
+        "",
+        "# fo = fast on。快通道保持默认关：它每 2 tick 刷一行，只在采集这种需要",
+        "# 100ms 闭环的场合由 Rust 侧临时打开，用完即关。",
+        "execute unless score #inited trit_bridge matches 1 run scoreboard players set fo trit_bridge 0",
+        "",
+        "# 以下都是每 tick 重算的中间量，重复清零无害",
         "scoreboard players set tf trit_bridge 0",
         "scoreboard players set t trit_bridge 0",
         "scoreboard players set wal trit_bridge 0",
