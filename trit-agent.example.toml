@@ -32,7 +32,10 @@ toggle_move_vk = 118
 toggle_perspective_vk = 121
 
 # hold = 原地护主 / patrol = 向前巡逻 / follow = 跟随
-mode = "hold"
+#
+# 默认 patrol：需求第一条是「要能自动移动」。hold 是**原地待命**，
+# Forward 通道永远不投票前进 —— AI 只会站着扫视，看着就像「AI 不动」。
+mode = "patrol"
 
 # 「次操作」开关：false 表示这一项完全交给人类，AI 不碰
 ch_movement = true

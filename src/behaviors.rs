@@ -940,6 +940,42 @@ mod tests {
         assert_eq!(d.dirs[Channel::Forward.index()], Tri::Pos);
     }
 
+    /// 回归测试：默认配置必须是 patrol。
+    ///
+    /// 这条锁的是「AI 不动」的一个直接原因：需求第一条是「要能自动移动」，
+    /// 而 `mode = "hold"` 是**原地待命** —— Forward 通道永远不投票前进，
+    /// 角色只会站着扫视，看起来就像 AI 坏了。默认值改回 hold 时本测试会红。
+    #[test]
+    fn default_mode_is_patrol_so_the_ai_actually_moves() {
+        assert_eq!(
+            Config::default().mode,
+            Mode::Patrol,
+            "默认必须是 patrol：hold 是原地待命，Forward 通道不投票前进"
+        );
+    }
+
+    /// 反向锁：hold 模式确实不前进。
+    ///
+    /// 有了这条，将来谁想把 hold 也改成会走，会立刻发现 hold 的语义
+    /// （原地护主）被破坏了 —— 两个模式的行为差异必须是明确的。
+    #[test]
+    fn hold_mode_never_advances() {
+        let mut cfg = Config::default();
+        cfg.mode = Mode::Hold;
+        let mut b = Behaviors::new(&cfg);
+        let mut m = Machine::new();
+        m.set_armed(true);
+        let all = [true; 7];
+        let c = ctx(Phase::Idle, 1000, 1.0, false);
+        let votes = b.vote(&c);
+        let d = m.step(&c.w, &votes, &all);
+        assert_ne!(
+            d.dirs[Channel::Forward.index()],
+            Tri::Pos,
+            "hold 是原地待命，不该前进"
+        );
+    }
+
     #[test]
     fn combat_attacks_on_rhythm() {
         let cfg = Config::default();

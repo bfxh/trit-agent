@@ -249,7 +249,9 @@ impl Default for Config {
             toggle_attack_vk: 0x75, // F6
             toggle_move_vk: 0x76,   // F7
             toggle_perspective_vk: 0x79, // F10
-            mode: Mode::Hold,
+            // 默认巡逻：需求是「要能自动移动」。Hold 是原地待命，
+            // Forward 通道不投票前进 —— AI 会站着扫视，看着就像「AI 不动」。
+            mode: Mode::Patrol,
             channels: Channels::default(),
             tactics: Tactics::default(),
             strategies: crate::strategy::Strategies::default(),
@@ -540,7 +542,10 @@ toggle_move_vk = 118
 toggle_perspective_vk = 121
 
 # hold = 原地护主 / patrol = 向前巡逻 / follow = 跟随
-mode = "hold"
+#
+# 默认 patrol：需求第一条就是「要能自动移动」。hold 是**原地待命**——
+# Forward 通道永远不投票前进，角色只会站着扫视，看起来就像「AI 不动」。
+mode = "patrol"
 
 # 「次操作」开关：false 表示这一项完全交给人类，AI 不碰
 ch_movement = true
@@ -653,7 +658,7 @@ mod tests {
     fn defaults_parse_from_shipped_toml() {
         let c = Config::from_str(DEFAULT_TOML);
         assert_eq!(c.hz, 200);
-        assert_eq!(c.mode, Mode::Hold);
+        assert_eq!(c.mode, Mode::Patrol);
         assert!(c.third_person_on_start);
         assert_eq!(c.kill_switch_vk, 0x77);
         assert!(c.channels.attack);
