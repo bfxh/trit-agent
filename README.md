@@ -128,9 +128,12 @@ tac_breach = true   # 卡住低头砍墙
                     └─ 未来通道 ── 实现 CommandSink 即可
 ```
 
-先装数据包（`squad` 会随 `build_datapacks.py` 一起打进 `dist/`）：
+先装数据包（在 **[bfxh/trit-mc](https://github.com/bfxh/trit-mc)** 里，
+`squad` 会随 `build_datapacks.py` 一起打进 `dist/`）：
 
 ```bash
+git clone git@github.com:bfxh/trit-mc.git
+cd trit-mc
 python scripts/build_datapacks.py --install "E:/MC/MC/profiles/烦人的村民"
 ```
 
@@ -376,7 +379,7 @@ gather_max_chop_ms = 25000
 - **"看得见墙"是近似的。** 八个方向各测 1 格，靠 `#trit_bridge:solid` 这个方块
   标签判断。标签是 16 个原版 tag 加 96 个方块拼出来的 —— **拿不到完整的
   "所有固体方块"清单**，装了 mod 方块要自己往
-  `datapacks/trit_bridge/data/trit_bridge/tags/blocks/solid.json` 里加。
+  `trit-mc/datapacks/trit_bridge/data/trit_bridge/tags/blocks/solid.json` 里加。
   漏掉的后果是"AI 以为能过去，撞上"，由 `stuck` 检测兜底。
 - **不能规划路径。** 前方被墙挡住就换目标，不会绕。绕路需要路径规划，
   是另一个量级的事。
@@ -490,19 +493,20 @@ CFPA 汉化包覆盖了 `moborigins` / `origins-classes`，**没有覆盖 `origi
 **现已 2490 / 2490 全译完**（起源 241、能力 2100、容器 10、杂项 139）：
 选择界面里点进任何一个起源，右边那串技能名和说明也是中文了。
 
-分片写在 `datapacks/origins_zh/_parts/*.json`，合并后落到
-`datapacks/origins_zh/assets/origins-plus-plus/lang/zh_cn.json`：
+分片写在 `trit-mc/archive/origins/datapacks/origins_zh/_parts/*.json`，合并后落到
+`trit-mc/archive/origins/datapacks/origins_zh/assets/origins-plus-plus/lang/zh_cn.json`：
 
 ```bash
+cd trit-mc
 # 合并分片（逐条核对 key 是否真实存在）+ 校验 + 出资源包 + 塞进模组 jar
-python scripts/merge_zh.py  --mods "E:/MC/MC/profiles/烦人的村民/mods"
-python scripts/make_origins_zh.py --mods "E:/MC/MC/profiles/烦人的村民/mods" --inject
+python archive/origins/scripts/merge_zh.py  --mods "E:/MC/MC/profiles/烦人的村民/mods"
+python archive/origins/scripts/make_origins_zh.py --mods "E:/MC/MC/profiles/烦人的村民/mods" --inject
 ```
 
 **为什么分成片 + 按序号回填**：两千多条如果每条都手写
 `power.origins-plus-plus.xxx/yyy.name` 这种 key，光 key 就两万多字符，
 错一个字母就静默失效。所以先把英文导出成 `序号<TAB>key<TAB>英文` 的 TSV，
-翻译时只写 `序号<TAB>中文`，由 `scripts/apply_zh.py` 回填——序号对不上直接报错，
+翻译时只写 `序号<TAB>中文`，由 `apply_zh.py` 回填——序号对不上直接报错，
 不可能错位。TSV 是逐行存的，原文里的换行用 `⏎` 占位，回填时还原成 `\n`
 （技能说明里那些换行是 tooltip 排版的一部分）。
 
@@ -543,7 +547,7 @@ key 写错一个字母，游戏**照常显示英文，不报错、不写日志**
 **起源与技能名**在另外两个地方，缺一样就显示成 `power.summoner.summon_wolves.name`：
 
 1. `data/summoner/powers/*.json` 里的 `name` / `description`（字面量中文）；
-2. `datapacks/summoner_lang` —— 这是个**资源包**，必须放进 `resourcepacks/` 并在游戏里启用。
+2. `trit-mc/datapacks/summoner_lang` —— 这是个**资源包**，必须放进 `resourcepacks/` 并在游戏里启用。
    数据包里的 `assets/` 不参与加载，所以 `summoner_origin.zip` 里那份 lang 是备份，不生效。
 
 ### 第三视角
@@ -597,18 +601,26 @@ Minecraft 走 LWJGL3，窗口类名固定是 `GLFW30`；而**标题是整合包�
 
 ## 数据包
 
+> **数据包在另一个仓库**：**[bfxh/trit-mc](https://github.com/bfxh/trit-mc)**
+> —— Minecraft 侧（数据包 + 起源包 + 打包脚本）跟 Rust 状态机拆开了。
+> 本仓库只管 Rust 那一半。
+
 ```
-datapacks/
-  summoner_origin/   召唤师起源：3 只战狼 + 铁卫，召唤物会主动打村民和整合包敌对 NPC
-  npc_origins/       给 NPC 挂「起源式」效果（打 tag 生效，默认无副作用）
-  trit_bridge/       传感器：快慢双通道，把血量/坐标/敌人/原木/矿石/墙体/俯仰角写进聊天
-  squad/             共同意识的执行端：receive 意图 → 改傀儡/狼的 AngryAt
-  summoner_lang/     召唤师起源的中文名称（资源包）
+trit-mc/
+  datapacks/
+    summoner_origin/   召唤师起源：3 只战狼 + 铁卫，召唤物会主动打村民和整合包敌对 NPC
+    npc_origins/       给 NPC 挂「起源式」效果（打 tag 生效，默认无副作用）
+    trit_bridge/       传感器：快慢双通道，把血量/坐标/敌人/原木/矿石/墙体/俯仰角写进聊天
+    squad/             共同意识的执行端：receive 意图 → 改傀儡/狼的 AngryAt
+    summoner_lang/     召唤师起源的中文名称（资源包）
+  archive/origins/     隔离的起源包（不随状态机打包）
+  scripts/             打包 / 装包 / 自检 / 崩溃诊断
 ```
 
 安装：
 
 ```bash
+git clone git@github.com:bfxh/trit-mc.git && cd trit-mc
 python scripts/build_datapacks.py --install "E:/MC/MC/profiles/烦人的村民"
 ```
 
@@ -618,9 +630,16 @@ python scripts/build_datapacks.py --install "E:/MC/MC/profiles/烦人的村民"
 **唯一**的集成点，而且中间没有任何握手 —— 字段拼错一个字母，两边都不报错，
 只是这个量永远等于「没感知」。
 
-`build_datapacks.py` 每次打包都会拿数据包实际输出的字段去比对 Rust 解析器
-**源码**里 `parse_patch` 的 match 分支（不手写名单对照，手写名单会跟代码一起
-过时，反而变成「两边都错所以通过」）。查两件事：
+协议名单由 **Rust 侧自己维护**（`perceive::PROTOCOL_FIELDS`），并有测试盯着
+「名单和 `parse_patch` 的 match 分支逐字一致」：
+
+```bash
+trit-agent protocol          # 一行一个字段
+trit-agent protocol --json   # 脚本读这个
+```
+
+MC 侧的打包器每次都拿这份名单校验数据包实际输出的字段（不手写名单对照，
+手写名单会跟代码一起过时，反而变成「两边都错所以通过」）。查两件事：
 
 1. text 里声明的协议字段名（`<TRIT hp=` 的 `hp`）必须在 Rust 白名单里；
 2. `k=` 标签的个数必须等于 score 片段的个数（多一个标签＝写了标签没取值）。
@@ -628,6 +647,7 @@ python scripts/build_datapacks.py --install "E:/MC/MC/profiles/烦人的村民"
 当前两边正好对上 18 个：`b1 bd c d food h hp o od p s t w wal wd x y z`。
 
 ```bash
+cd trit-mc
 python scripts/build_datapacks.py --selftest   # 用坏样本验证检查器本身有效
 ```
 
@@ -646,12 +666,13 @@ python scripts/build_datapacks.py --selftest   # 用坏样本验证检查器本�
 
 ### 起源包会被"照 schema 体检"
 
-`build_datapacks.py` 打完包会自动跑一次 `scripts/validate_origins.py`：
+`build_datapacks.py` 打完包会自动跑一次 `validate_origins.py`（在 trit-mc 仓库里）：
 
 ```bash
-python scripts/validate_origins.py            # 只查本仓库的 summoner_origin
-python scripts/validate_origins.py --all      # 连模组自带的起源一起查（自测）
-python scripts/validate_origins.py --selftest # 用坏样本验证校验器本身
+cd trit-mc
+python archive/origins/scripts/validate_origins.py            # 只查本仓库的 summoner_origin
+python archive/origins/scripts/validate_origins.py --all      # 连模组自带的起源一起查（自测）
+python archive/origins/scripts/validate_origins.py --selftest # 用坏样本验证校验器本身
 ```
 
 依据不是文档，而是**这套整合包真实注册的 id** —— 从 `origins-forge` 和它内嵌的
@@ -684,6 +705,7 @@ python scripts/validate_origins.py --selftest # 用坏样本验证校验器本�
 
 ```bash
 # 只读，游戏开着也能跑
+cd trit-mc
 python scripts/save_packs.py status "E:/MC/MC/profiles/烦人的村民"
 
 # 退出游戏后，一次把所有存档的 file/ 包全开
@@ -697,6 +719,7 @@ python scripts/save_packs.py enable "E:/MC/MC/profiles/烦人的村民" --all
 所以把「外面看一眼」做成了一条命令（只读，不写任何文件）：
 
 ```bash
+cd trit-mc
 python scripts/check_env.py --profile "E:/MC/MC/profiles/烦人的村民"
 ```
 
@@ -813,7 +836,7 @@ python scripts/check_env.py --profile "E:/MC/MC/profiles/烦人的村民"
 这个区分很要紧，把"不知道有没有墙"当成"没有墙"，AI 会全速撞上去）。
 反过来也一样：Rust 侧不认识新字段就忽略。两边可以独立升级。
 
-`scripts/build_datapacks.py` 会静态校验 `function` 引用和 `#trit_bridge:*`
+`trit-mc` 的 `build_datapacks.py` 会静态校验 `function` 引用和 `#trit_bridge:*`
 方块标签引用：写错一个字母游戏不会报错，只会让 `if block` 永远为假 ——
 表现是「AI 看不见墙」而不是「数据包坏了」。这种静默失败最耗时间。
 

@@ -35,8 +35,19 @@ REM ---- 数据包启用检查 ----
 REM 新世界 / 新建的存档，数据包常常是「拷进去了但没启用」——
 REM 表现为传感器一条数据都不吐、AI 永远 hp=?、角色站桩不动。
 REM 游戏没开时直接帮用户改 level.dat；游戏开着就提示敲命令。
+REM
+REM 数据包脚本现在在**另一个仓库**（bfxh/trit-mc）里了，
+REM 本仓库只剩 Rust 侧。两处都找，找不到就跳过（不报错）。
 if exist scripts\fix_world.py (
     python scripts\fix_world.py
+    echo.
+) else if exist ..\trit-mc\scripts\fix_world.py (
+    python ..\trit-mc\scripts\fix_world.py
+    echo.
+) else (
+    echo   [提示] 没找到数据包脚本（fix_world.py）。
+    echo          装在 ..\trit-mc 里的话可以跳过这步 ——
+    echo          手动在游戏里敲 /datapack enable "file/trit_bridge.zip" 也行。
     echo.
 )
 

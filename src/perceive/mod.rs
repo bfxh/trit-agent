@@ -18,7 +18,7 @@ pub mod logtail;
 
 use std::fmt;
 
-/// 方块类别。**编码必须和 `scripts/make_trit_bridge.py` 里的 `CLS_*` 一致**。
+/// 方块类别。**编码必须和 `make_trit_bridge.py`（在 bfxh/trit-mc 仓库里）里的 `CLS_*` 一致**。
 ///
 /// 分类的标准不是「它是什么方块」，而是「拿它怎么办」：
 /// 能不能过去、值不值得挖、挖了会不会死。同一类方块在这个视角下没有区别，
@@ -392,6 +392,48 @@ pub fn classify(line: &str) -> Option<LogEvent> {
 
 /// 解析一帧。`fast` 决定哪些字段算「这条通道会报的」。
 ///
+/// 传感器协议里 Rust 侧认得的**全部字段名**。
+///
+/// 这是**跨仓库契约**：MC 数据包仓库（`bfxh/trit-mc`）里的
+/// `build_datapacks.py` 要拿它来校验数据包报出来的字段名，
+/// 但两个仓库已经拆开，它读不到本仓库的源码了。
+///
+/// 所以用 `trit-agent protocol` 这个子命令把它导出出去 ——
+/// **代码是唯一事实来源**，不手写第二份名单。
+///
+/// 手写名单会跟代码脱节：改名时两边一起过时，检查反而变成
+/// 「两边都错所以通过」。
+pub const PROTOCOL_FIELDS: &[&str] = &[
+    "hp", "food", "x", "y", "z", "h", "d", "c", "w", "wd", "o", "od", "t", "p", "wal", "b1", "bd",
+    "s",
+];
+
+/// 导出协议字段名（一行一个，给脚本读）。
+///
+/// 单独跑 `trit-agent protocol` 就是给人看的；
+/// `trit-agent protocol --json` 给脚本读。
+pub fn protocol_fields_json() -> String {
+    let mut s = String::from("[");
+    for (i, f) in PROTOCOL_FIELDS.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push('"');
+        s.push_str(f);
+        s.push('"');
+    }
+    s.push(']');
+    s
+}
+
+/// 慢通道的字段（不含快通道专属的 `wal` / `b1` / `bd` / `s`）。
+pub const PROTOCOL_FIELDS_SLOW: &[&str] = &[
+    "hp", "food", "x", "y", "z", "h", "d", "c", "w", "wd", "o", "od", "t", "p",
+];
+
+/// 快通道的字段（不含血量）。
+pub const PROTOCOL_FIELDS_FAST: &[&str] = &["wal", "b1", "bd", "s", "p"];
+
 /// 两条通道共用一套 key=value 语法，只有快通道带 `wal` / `b1` / `bd`。
 /// 老版本数据包没有 `w` / `wd` / `t` / `p` 这些字段，缺失时按 `None` 处理，
 /// 于是「升级 Rust 就得同步重装数据包」这种耦合不会出现。
@@ -463,6 +505,111 @@ fn parse_patch(body: &str, fast: bool) -> Option<SensorPatch> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `PROTOCOL_FIELDS` 必须和 `parse_patch` 的 `match` 分支**逐字对应**。
+    ///
+    /// 这份名单被导出给 MC 数据包仓库用（跨仓库契约）。
+    /// 如果两处不一致，后果是**静默**的：
+    /// 数据包报了个 Rust 不认的字段 → Rust 那侧当「这条通道没报这个量」
+    /// → 少一个感知量，但**不报错、不崩溃**。
+    ///
+    /// 所以这个测试是跨仓库契约的守门人：改了解析器忘了改名单（或反过来），
+    /// 这里立刻红。
+    #[test]
+    fn protocol_fields_match_parser_branches() {
+        let src = include_str!("mod.rs");
+        // 锚定到**函数体里的**那个 match —— 不能用 `find("match k {")`，
+        // 因为本测试文件里也有一行字符串包含这四个字，会先被找到，
+        // 结果只抠出一个分支。
+        let anchor = "fn parse_patch(body: &str, fast: bool)";
+        let fn_at = src.find(anchor).expect("找不到 parse_patch 定义");
+        let start = src[fn_at..]
+            .find("match k {")
+            .map(|i| fn_at + i)
+            .expect("找不到 parse_patch 的 match");
+        let body = &src[start..];
+        // 12 空格缩进 = match 分支层，别把别的 match 也捞进来。
+        //
+        // 只认 `"名字" =>` 开头（含 `"名字" => {` 这种带花括号的）。
+        // 不能遇到 `}` 就 break —— `"hp" => {` 是多行分支，
+        // 它的闭合 `}` 在下一层缩进上，提前 break 会只拿到第一个字段。
+        let mut branches: Vec<&str> = Vec::new();
+        for line in body.lines() {
+            let t = line.trim_start();
+            if line.len() != t.len() + 12 {
+                continue;
+            }
+            let Some(rest) = t.strip_prefix('"') else {
+                continue;
+            };
+            let Some(end) = rest.find('"') else {
+                continue;
+            };
+            let name = &rest[..end];
+            if rest[end..].starts_with("\" =>") {
+                branches.push(name);
+            }
+        }
+        assert!(
+            !branches.is_empty(),
+            "从源码里没抠出任何 match 分支 —— 提取逻辑坏了"
+        );
+        assert_eq!(
+            branches.len(),
+            PROTOCOL_FIELDS.len(),
+            "协议字段数不一致：\n  解析器: {branches:?}\n  名单:   {PROTOCOL_FIELDS:?}"
+        );
+        for (i, b) in branches.iter().enumerate() {
+            assert_eq!(
+                *b,
+                PROTOCOL_FIELDS[i],
+                "第 {i} 个字段不一致：解析器是 {b}，名单是 {}",
+                PROTOCOL_FIELDS[i]
+            );
+        }
+    }
+
+    /// 慢/快通道的字段划分必须和解析逻辑一致。
+    ///
+    /// 慢通道必须含 `hp`（它是「这是一帧传感器行」的判据），
+    /// 快通道必须不含 `hp`（快通道没有血量）。
+    #[test]
+    fn slow_and_fast_field_split_is_sane() {
+        assert!(
+            PROTOCOL_FIELDS_SLOW.contains(&"hp"),
+            "慢通道必须有 hp —— 它是解析器的有效帧判据"
+        );
+        assert!(
+            !PROTOCOL_FIELDS_FAST.contains(&"hp"),
+            "快通道不能有 hp —— 快通道不含血量"
+        );
+        assert!(
+            PROTOCOL_FIELDS_FAST.contains(&"wal"),
+            "快通道必须有 wal（墙体掩码）"
+        );
+        // 两个子集拼起来 = 全集
+        let mut union: Vec<&str> = PROTOCOL_FIELDS_SLOW.to_vec();
+        union.extend_from_slice(PROTOCOL_FIELDS_FAST);
+        for f in PROTOCOL_FIELDS {
+            assert!(
+                union.contains(f),
+                "字段 {f} 既不在慢通道也不在快通道 —— 解析器会认它但通道归属没定"
+            );
+        }
+    }
+
+    #[test]
+    fn protocol_json_is_valid() {
+        let j = protocol_fields_json();
+        assert!(j.starts_with('[') && j.ends_with(']'));
+        // 简单校验：逗号分隔的引号字符串
+        let inner = &j[1..j.len() - 1];
+        for part in inner.split(',') {
+            let p = part.trim();
+            assert!(p.starts_with('"') && p.ends_with('"'), "字段项格式错: {p}");
+        }
+        assert_eq!(inner.split(',').count(), PROTOCOL_FIELDS.len());
+    }
 
     #[test]
     fn parses_chat() {

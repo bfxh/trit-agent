@@ -31,6 +31,7 @@ fn main() {
         "run" => run(&flags),
         "stop" => stop_daemon(),
         "status" => daemon_status(),
+        "protocol" => protocol(&flags),
         "init" => init(&flags),
         "help" | "-h" | "--help" => help(),
         _ => {
@@ -65,6 +66,29 @@ fn daemon_status() {
     #[cfg(not(windows))]
     {
         println!("后台守护只在 Windows 上可用。");
+    }
+}
+
+/// 导出传感器协议字段名。
+///
+/// **给 MC 数据包仓库用的**：数据包仓库（`bfxh/trit-mc`）里的
+/// `build_datapacks.py`（在 bfxh/trit-mc 仓库里）要校验「数据包报的字段名 Rust 认不认得」，
+/// 但两个仓库已经拆开，它读不到 Rust 源码了。
+///
+/// 以前它是直接 `open("src/perceive/mod.rs")` 用正则抠 `match` 分支的 ——
+/// 一拆仓库就断了。现在改成调这个命令：
+///
+///     trit-agent protocol          # 人看的：一行一个字段
+///     trit-agent protocol --json   # 脚本读的：JSON 数组
+///
+/// 代码仍然是唯一事实来源（名单在 `perceive::PROTOCOL_FIELDS`）。
+fn protocol(flags: &Flags) {
+    if flags.has("json") {
+        println!("{}", trit_agent::perceive::protocol_fields_json());
+    } else {
+        for f in trit_agent::perceive::PROTOCOL_FIELDS {
+            println!("{f}");
+        }
     }
 }
 
@@ -907,7 +931,7 @@ fn probe(flags: &Flags) {
             None => {
                 println!("传感器: **没有数据** —— 数据包没启用，或 minecraft:tick 标签作废");
                 println!("  查法：游戏里敲 /datapack enable \"file/trit_bridge.zip\"");
-                println!("  或跑 python scripts/check_env.py 看 [2] 和 [5] 两项");
+                println!("  或在 bfxh/trit-mc 仓库里跑 python scripts/check_env.py 看 [2] 和 [5] 两项");
             }
         }
     }
