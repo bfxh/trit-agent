@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -318,6 +319,54 @@ def check_proto(r, profile) -> None:
         r.ok("数据包报的字段 Rust 全认得，标签与取值一一对应")
 
 
+def check_rrls(r, profile) -> None:
+    """[7] rrls（崩溃真凶）在不在。
+
+    rrls = "Remove Reloading Screen"，整合包自带，作者 dimadencep。
+    它用 mixin 的 `@Redirect` 劫持 `Minecraft.overlay` 字段读取，
+    在加载界面还挂着时返回 null，把原版 `runTick()` 里
+    `overlay == null` 的判断反转了 —— 于是加载阶段也跑
+    `handleKeybinds`，而此时 `player` 还是 null，直接 NPE 崩溃。
+
+    崩溃栈全是原版帧，看不出是谁干的。这是**唯一**的元凶：
+    第二次崩溃时守护进程压根没启动，一个按键都没注入过。
+
+    注意：`config/rrls.toml` 里的 `enabled = false` **没用** ——
+    那是 AutoConfig 的配置项，管不到 mixin 注入。
+    唯一可靠的办法是不让这个 jar 被 Forge 加载。
+    """
+    print("[7] rrls（崩溃真凶）")
+    mods = profile / "mods"
+    if not mods.is_dir():
+        r.warn("没有 mods/ 目录，跳过")
+        return
+
+    hits = []
+    for name in sorted(os.listdir(mods)):
+        low = name.lower()
+        if not (low.endswith(".jar") or low.endswith(".jar.disabled")):
+            continue
+        try:
+            with zipfile.ZipFile(mods / name) as z:
+                if "rrls-common.mixins.json" in z.namelist():
+                    hits.append(name)
+        except (zipfile.BadZipFile, OSError):
+            continue
+
+    if not hits:
+        r.ok("没有 rrls（整合包更新过的话，上游可能已经修好了）")
+        return
+
+    active = [n for n in hits if not n.lower().endswith(".disabled")]
+    if active:
+        r.fail(
+            f"rrls 处于启用状态，会导致进世界前 NPE 崩溃: {', '.join(active)}",
+            "跑 python scripts/toggle_rrls.py disable（可随时 enable 恢复）",
+        )
+    else:
+        r.ok(f"rrls 已禁用（{', '.join(hits)}），崩溃真凶已排除")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--profile", default=str(DEFAULT_PROFILE), help="游戏实例目录")
@@ -337,6 +386,7 @@ def main() -> int:
     check_sensors(r, profile)
     check_mod_tags(r, profile)
     check_proto(r, profile)
+    check_rrls(r, profile)
 
     print()
     if r.bad:
